@@ -61,7 +61,13 @@ library
     other-extensions: ScopedTypeVariables,
                       BlockArguments,
                       LambdaCase,
-                      GADTs
+                      GADTs,
+                      RecordWildCards,
+                      OverloadedRecordDot,
+                      ViewPatterns,
+                      NoFieldSelectors,
+                      StrictData,
+                      PatternSynonyms
 
     -- Other library packages from which modules are imported.
     build-depends:    base ^>=4.16.0.0,
@@ -78,6 +84,9 @@ library
 test-suite monadic-bang-test
     -- Base language which the package is written in.
     default-language: GHC2021
+
+    -- LANGUAGE extensions used by modules in this package.
+    other-extensions: BlockArguments
 
     -- The interface type and version of the test suite.
     type:             exitcode-stdio-1.0
