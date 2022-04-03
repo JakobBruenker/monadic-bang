@@ -65,7 +65,6 @@ library
                       RecordWildCards,
                       OverloadedRecordDot,
                       ViewPatterns,
-                      NoFieldSelectors,
                       StrictData,
                       PatternSynonyms
 

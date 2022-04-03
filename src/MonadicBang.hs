@@ -26,6 +26,8 @@ import GHC.Types.Error
 
 import Debug.Trace
 
+-- TODO: Write user manual as haddock comment
+
 plugin :: Plugin
 plugin = defaultPlugin
   { parsedResultAction = replaceBangs
@@ -62,10 +64,11 @@ replaceBangs _ _ (ParsedResult (HsParsedModule lexp files) msgs) =
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: forall a . Data a => Map Loc (HsExpr GhcPs) -> a -> a
-fillHoles fillers ast = case runRWS (go ast) () fillers of
+fillHoles :: Data a => Map Loc (HsExpr GhcPs) -> a -> a
+fillHoles fillers ast = case runRWS (go ast) () (MkFillState fillers firstUnique) of
   -- TODO: throw error if remaining isn't empty
-  (ast, remaining, stmts) -> ast
+  (ast', state', stmts) | null state'.remainingErrors -> ast'
+                        | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
   where
 
 -- TODO: embed the expression in existing or new do-notation
@@ -73,20 +76,61 @@ fillHoles fillers ast = case runRWS (go ast) () fillers of
 -- make a separate monadic traversal through the subtree with a writer monad,
 -- adding the bindings we need to the monadic context so we can construct the
 -- correct do block once the traversal is evaluated
--- TODO for large modules with lots of !s, this might be slightly faster if we
--- only consider bangs we haven't found yet, i.e. remove others from the list.
     go :: forall a . Data a => a -> Fill a
-    go = gmapM \cases
-      (e :: e) -> eqT @e @(LHsExpr GhcPs) & \cases
-        (Just Refl)
-          | lexp@(ExprLoc (dropBang -> loc) (HsUnboundVar _ _)) <- e
-          , Just expr <- fillers M.!? loc
-          -> go (lexp $> expr)
-        _ -> go e
+    go = gmapM $ \ast' -> case ast' of
+      (e :: e) -> go =<< do
+        eqT @e @(LHsExpr GhcPs) & \cases
+          (Just Refl) | lexp@(ExprLoc (dropBang -> loc) (HsUnboundVar _ _)) <- e
+                      -> maybe e (lexp $>) <$> popError loc
+          _ -> pure e
 
 -- TODO add something to state that lets us generate new variable names (hmm how do we make sure they don't clash with anything? If they're long enough I guess that would be sufficient)
 -- This might just be IO btw, need not be state - although random isn't a boot package... and I'd rather only rely on those
 -- this would be easier if we were in TcM
 -- anyway take a look at unsafeGetFreshLocalUnique - don't think we can use it though
 -- we don't technically even *need* randomness - we could start with one randomly generated number that we then use for every module, and increment by one every time
-type Fill = RWS () [(RdrName, HsExpr GhcPs)] (Map Loc (HsExpr GhcPs))
+type Fill = RWS () [(RdrName, HsExpr GhcPs)] FillState
+
+data FillState = MkFillState
+  { remainingErrors :: Map Loc (HsExpr GhcPs)
+  , currentUnique :: UniqueVar
+  }
+
+-- | Look up an error and remove it from the remaining errors if found
+popError :: Loc -> Fill (Maybe (HsExpr GhcPs))
+popError loc = do
+  remaining <- getRemaining
+  let (res, remaining') = M.updateLookupWithKey (\_ _ -> Nothing) loc remaining
+  putRemaining remaining'
+  pure res
+
+getRemaining :: Fill (Map Loc (HsExpr GhcPs))
+getRemaining = gets \s -> s.remainingErrors
+
+putRemaining :: Map Loc (HsExpr GhcPs) -> Fill ()
+putRemaining remaining = modify \s -> s{remainingErrors = remaining}
+
+newUnique :: Fill UniqueVar
+newUnique = do
+  state' <- gets \s -> s{currentUnique = mkUnique $ getUniqueN s.currentUnique + 1}
+  put state'
+  pure state'.currentUnique
+
+-- | A locally unique identifier
+data UniqueVar = UnsafeMkUnique Int RdrName
+
+mkUnique :: Int -> UniqueVar
+mkUnique n = UnsafeMkUnique n . mkVarUnqual . fsLit $ "__MonadicBang_unique_ " ++ show (n + firstUniqueN)
+
+getUniqueVar :: UniqueVar -> RdrName
+getUniqueVar (UnsafeMkUnique _ name) = name
+
+getUniqueN :: UniqueVar -> Int
+getUniqueN (UnsafeMkUnique n _) = n
+
+-- | Randomly chosen but fixed 28-bit number
+firstUniqueN :: Int
+firstUniqueN = 0b1111000011101100101010011100
+
+firstUnique :: UniqueVar
+firstUnique = mkUnique firstUniqueN
