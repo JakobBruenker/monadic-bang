@@ -33,7 +33,7 @@ homepage:           https://github.com/JakobBruenker/monadic-bang
 bug-reports:        https://github.com/JakobBruenker/monadic-bang/issues
 
 -- The license under which the package is released.
-license:            GPL-3.0-only
+license:            MIT
 
 -- The package author(s).
 author:             Jakob Brünker
@@ -71,8 +71,9 @@ library
     -- Other library packages from which modules are imported.
     build-depends:    base ^>=4.16.0.0,
                       ghc >= 9.3,
-                      transformers ^>= 0.5.6.2,
                       containers ^>= 0.6.4.1,
+                      transformers ^>= 0.5.6.2,
+                      mtl ^>= 2.2.2,
 
     -- Directories containing source files.
     hs-source-dirs:   src

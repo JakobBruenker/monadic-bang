@@ -30,6 +30,7 @@ bangWithoutDo = assertEq "monadic-bang-test" !getProgName
 -- mdo
 -- rec
 -- do
+-- list/monad comprehension (treat like do? idris does.)
 -- lambda
 -- case scrutinee
 -- case body
