@@ -5,18 +5,22 @@
 module Main (main) where
 
 import GHC.Stack
-import System.Environment
+import Data.Char
 
-progName :: String
-progName = "monadic-bang-test"
+getA, getB, getC :: IO String
+getA = pure "a"
+getB = pure "b"
+getC = pure "c"
 
 main :: IO ()
-main = withProgName progName do
+main = do
   bangWithoutDo
   bangInsideDo
   bangInsideMDo
   bangInsideRec
   bangNested
+  bangCase
+  bangLambda
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -25,14 +29,15 @@ assertEq expected actual
       error $ "Expected " <> show expected <> ", but got " <> show actual
 
 bangWithoutDo :: HasCallStack => IO ()
-bangWithoutDo = assertEq progName !getProgName
+bangWithoutDo = assertEq "a" !getA
 
 bangInsideDo :: HasCallStack => IO ()
 bangInsideDo = do
-  let ioProgNameA = getProgName
-  assertEq (progName ++ progName) (!ioProgNameA ++ !ioProgNameB)
+  let ioA = getA
+      nonIOC = !getC
+  assertEq "abc" (!ioA ++ !ioB ++ nonIOC)
   where
-    ioProgNameB = getProgName
+    ioB = getB
 
 bangInsideMDo :: HasCallStack => IO ()
 bangInsideMDo = assertEq (Just $ replicate @Int 10 -1) $ take 10 <$> mdo
@@ -46,14 +51,25 @@ bangInsideRec = assertEq (Just $ take @Int 10 $ cycle [1, -1]) $ take 10 <$> do
   pure xs
 
 bangNested :: HasCallStack => IO ()
-bangNested = assertEq (reverse progName ++ progName)
-                      !(pure (!(reverse <$> !(pure getProgName)) ++ !(!(pure getProgName))))
+bangNested = assertEq "Ab"
+                      !(pure (!(fmap toUpper <$> !(pure getA)) ++ !(!(pure getB))))
+
+bangCase :: HasCallStack => IO ()
+bangCase = assertEq "b" case !getA of
+  something | something == !getA -> !getB
+  _ -> ""
+
+bangLambda :: HasCallStack => IO ()
+bangLambda = assertEq "ab" $ (\a -> a ++ !getB) !getA
 
 -- DONE:
 -- do
 -- mdo
 -- rec
 -- multiply nested
+-- case scrutinee
+-- case body
+-- lambda
 
 -- TODO:
 -- let; in Idris the do block is around the entire let expression I don't know if I like that though?
@@ -63,9 +79,6 @@ bangNested = assertEq (reverse progName ++ progName)
 --    In any case, it's probably a good idea to stick to the idris conventions for now
 -- where
 -- list/monad comprehension (treat like do? idris does.)
--- lambda
--- case scrutinee
--- case body
 -- case where (treat the same as top level? That's how idris does it)
 -- view pattern -> seems kinda hard but doable (that is on top level, apart from that it's the same as everything else)
 -- let inside do; In idris this uses the existing do-block, so
@@ -87,3 +100,6 @@ bangNested = assertEq (reverse progName ++ progName)
 -- => potential solution: Disallow using variables that are bound in lambda or let blocks without explicitly surrounding them by a do, this seems like maybe a good idea
 --    Still would be more complicated than just syntax but not *too* much more complicated, just have to keep track of currently bound variables in the state
 --    I mean effectively this is just the same as not doing anything fancy at all, but with better error messages, so from that point of view maybe it's okay because the fancy stuff doesn't actually change semantics
+
+-- You could keep track in the state monad which variables were introduced together with how (e.g. via lambda, or via function definition, or via case pattern, etc.) and then tell the user
+-- something along the lines of "The variable blah would escape its scope if we did this. Possible fix: Start a do block inside the lambda/function definition/case expression that blah"
