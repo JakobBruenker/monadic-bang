@@ -72,8 +72,9 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
 fillHoles :: Data a => Map Loc Expr -> a -> a
 fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
   (ast', state') | null state'.remainingErrors -> ast'
-                 | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
-                                                               -- Use PsUnknownMessage
+                 -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
+                 --                                               -- Use PsUnknownMessage
+                 | otherwise -> trace "XXX JB WARNING" ast'
   where
 
 -- TODO: embed the expression in existing or new do-notation
@@ -116,7 +117,7 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
       case expr of
         -- Replace holes resulting from `!`
         HsUnboundVar _ _ -> do
-          expr' <- popError loc
+          expr' <- goDo =<< popError loc
           let name = mkVarName loc
           tell [name :<- expr']
           goDo $ e $> HsVar noExtField (noLocA name)
@@ -157,10 +158,10 @@ popError loc = do
     putRemaining remaining = modify \s -> s{remainingErrors = remaining}
 
 mkVarName :: Loc -> RdrName
--- using spaces and ! should make it impossible to overlap with user-defined
--- names (but could still technically overlap with names introduced by other
--- plugins)
-mkVarName loc = mkVarUnqual . fsLit $ printf "<! in line %d, column %d>" loc.line loc.col
+-- using spaces and special characters should make it impossible to overlap
+-- with user-defined names (but could still technically overlap with names
+-- introduced by other plugins)
+mkVarName loc = mkVarUnqual . fsLit $ printf "<! from line %d, column %d>" loc.line loc.col
 
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure

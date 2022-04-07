@@ -6,7 +6,6 @@ module Main (main) where
 
 import GHC.Stack
 import System.Environment
-import System.Exit
 
 progName :: String
 progName = "monadic-bang-test"
@@ -17,6 +16,7 @@ main = withProgName progName do
   bangInsideDo
   bangInsideMDo
   bangInsideRec
+  bangNested
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -35,16 +35,25 @@ bangInsideDo = do
     ioProgNameB = getProgName
 
 bangInsideMDo :: HasCallStack => IO ()
-bangInsideMDo = assertEq (Just $ replicate 10 -1) $ take 10 <$> mdo
+bangInsideMDo = assertEq (Just $ replicate @Int 10 -1) $ take 10 <$> mdo
   xs <- Just (1:xs)
   pure (negate <$> !(pure xs))
 
 bangInsideRec :: HasCallStack => IO ()
-bangInsideRec = assertEq (Just $ replicate 10 1) $ take 10 <$> do
-  rec xs <- Just (1:xs)
-      pure (negate <$> !(pure xs))
+bangInsideRec = assertEq (Just $ take @Int 10 $ cycle [1, -1]) $ take 10 <$> do
+  rec xs <- Just (1:ys)
+      ys <- pure (negate <$> !(pure xs))
   pure xs
 
+bangNested :: HasCallStack => IO ()
+bangNested = assertEq (reverse progName ++ progName)
+                      !(pure (!(reverse <$> !(pure getProgName)) ++ !(!(pure getProgName))))
+
+-- DONE:
+-- do
+-- mdo
+-- rec
+-- multiply nested
 
 -- TODO:
 -- let; in Idris the do block is around the entire let expression I don't know if I like that though?
@@ -53,10 +62,6 @@ bangInsideRec = assertEq (Just $ replicate 10 1) $ take 10 <$> do
 --    But where *has* to work like top-level function definitions
 --    In any case, it's probably a good idea to stick to the idris conventions for now
 -- where
--- multiply nested
--- mdo
--- rec
--- do
 -- list/monad comprehension (treat like do? idris does.)
 -- lambda
 -- case scrutinee
