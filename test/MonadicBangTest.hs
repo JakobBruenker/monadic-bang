@@ -6,18 +6,27 @@ import GHC.Stack
 import System.Environment
 import System.Exit
 
+progName :: String
+progName = "monadic-bang-test"
+
 main :: IO ()
-main = do
+main = withProgName progName do
   bangWithoutDo
+  bangInsideDo
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
-  | expected == actual = return ()
+  | expected == actual = pure ()
   | otherwise = withFrozenCallStack do
       error $ "Expected " <> show expected <> ", but got " <> show actual
 
 bangWithoutDo :: HasCallStack => IO ()
-bangWithoutDo = assertEq "monadic-bang-test" !getProgName
+bangWithoutDo = assertEq progName !getProgName
+
+bangInsideDo :: HasCallStack => IO ()
+bangInsideDo = do
+  let ioProgName = getProgName
+  assertEq progName !ioProgName
 
 -- TODO:
 -- let; in Idris the do block is around the entire let expression I don't know if I like that though?

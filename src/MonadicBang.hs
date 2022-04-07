@@ -14,7 +14,7 @@ module MonadicBang (plugin) where
 import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Monad.State.Strict
-import Control.Monad.Writer.Strict
+import Control.Monad.Writer.CPS
 import Data.Data
 import Data.Functor
 import Data.Map.Strict (Map)
@@ -22,8 +22,9 @@ import Data.Map.Strict qualified as M
 import GHC
 import GHC.Data.Bag
 import GHC.Parser.Errors.Types
-import GHC.Plugins hiding (Expr)
+import GHC.Plugins hiding (Expr, empty)
 import GHC.Types.Error
+import GHC.Utils.Monad (concatMapM)
 import Text.Printf
 
 -- TODO: Write user manual as haddock comment
@@ -54,8 +55,8 @@ spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
-replaceBangs _ _ (ParsedResult (HsParsedModule lexp files) msgs) =
-  pure $ ParsedResult (HsParsedModule (fillHoles fills lexp) files) msgs{psErrors}
+replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
+  pure $ ParsedResult (HsParsedModule (fillHoles fills mod') files) msgs{psErrors}
   where
     -- Take out the errors we care about, throw the rest back in
     (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
@@ -69,8 +70,7 @@ replaceBangs _ _ (ParsedResult (HsParsedModule lexp files) msgs) =
 fillHoles :: Data a => Map Loc Expr -> a -> a
 fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
   (ast', state') | null state'.remainingErrors -> ast'
-                 | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url), possibly make an expression with custom type error signature so it will be shown as a proper error?
-                                                                      -- But we might not be able to, since the parsed module usually doesn't import that... :(
+                 | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
   where
 
 -- TODO: embed the expression in existing or new do-notation
@@ -79,38 +79,43 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
 -- adding the bindings we need to the monadic context so we can construct the
 -- correct do block once the traversal is evaluated
 
--- TODO: goNoDo shouldn't yet have the writer monad, only run the monads where it's actually necessary, don't need intercept
     goNoDo :: forall a m . (MonadState FillState m, Data a) => a -> m a
     goNoDo = gmapM \e -> maybe (goNoDo e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     tryInsertDo :: forall a m . (MonadState FillState m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
-      Refl <- hoistMaybe (eqT @a @Expr)
+      Refl <- hoistMaybe (eqT @a @LExpr)
       (expr', stmts) <- runWriterT (goDo expr)
       if null stmts
         then pure expr'
-        else let lastStmt = BodyStmt noExtField (noLocA expr') noExtField noExtField
-                 doStmts = (toHsStmt <$> stmts) ++ [lastStmt]
-             in pure $ HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ noLocA <$> doStmts)
-     where
-       toHsStmt :: BindStmt -> ExprStmt GhcPs
-       toHsStmt (var :<- boundExpr) = BindStmt EpAnnNotUsed varPat lexpr
-        where
-          varPat = noLocA . VarPat noExtField $ noLocA var
-          lexpr = noLocA boundExpr
+        else let lastStmt = BodyStmt noExtField expr' noExtField noExtField
+                 doStmts = (fromBindStmt <$> stmts) ++ [lastStmt]
+             in pure . noLocA $
+                  HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ noLocA <$> doStmts)
 
     goDo :: forall a m . (MonadFill m, Data a) => a -> m a
-    goDo = gmapM \e -> maybe (goDo e) pure =<< runMaybeT (tryExpr e)
+    goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (tryLExpr e)
 
-    tryExpr :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
-    tryExpr e = do
+    tryLExpr :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
+    tryLExpr e = do
       Refl <- hoistMaybe (eqT @a @LExpr)
-      lexp@(ExprLoc loc (HsUnboundVar _ _)) <- pure e
-      expr <- popError loc
-      let name = mkVarName loc
-      tell [name :<- expr]
-      goDo $ lexp $> HsVar noExtField (noLocA name)
+      ExprLoc loc expr <- pure e
+      case expr of
+        -- Replace holes resulting from `!`
+        HsUnboundVar _ _ -> do
+          expr' <- popError loc
+          let name = mkVarName loc
+          tell [name :<- expr']
+          goDo $ e $> HsVar noExtField (noLocA name)
+        -- If we encounter a `do`, use it instead of a `do` we inserted
+        HsDo xd ctxt (L l stmts) -> noLocA . HsDo xd ctxt . L l <$> concatMapM addStmts stmts
+        _ -> empty
+      where
+        addStmts :: ExprLStmt GhcPs -> MaybeT m [ExprLStmt GhcPs]
+        addStmts lstmt = do
+          (lstmt', stmts) <- runWriterT (goDo lstmt)
+          pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
 
 type MonadFill m = (MonadWriter [BindStmt] m, MonadState FillState m)
 
@@ -119,6 +124,12 @@ data FillState = MkFillState
   }
 
 data BindStmt = RdrName :<- Expr
+
+fromBindStmt :: BindStmt -> ExprStmt GhcPs
+fromBindStmt (var :<- boundExpr) = BindStmt EpAnnNotUsed varPat lexpr
+  where
+    varPat = noLocA . VarPat noExtField $ noLocA var
+    lexpr = noLocA boundExpr
 
 -- | Look up an error and remove it from the remaining errors if found
 popError :: MonadFill m => Loc -> MaybeT m Expr
