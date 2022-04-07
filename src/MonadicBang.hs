@@ -27,6 +27,8 @@ import GHC.Types.Error
 import GHC.Utils.Monad (concatMapM)
 import Text.Printf
 
+import Debug.Trace
+
 -- TODO: Write user manual as haddock comment
 
 plugin :: Plugin
@@ -56,7 +58,7 @@ spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
 replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
-  pure $ ParsedResult (HsParsedModule (fillHoles fills mod') files) msgs{psErrors}
+  pure $ ParsedResult (HsParsedModule (let m' = (fillHoles fills mod') in trace (showSDocUnsafe $ ppr m') m') files) msgs{psErrors}
   where
     -- Take out the errors we care about, throw the rest back in
     (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
@@ -71,6 +73,7 @@ fillHoles :: Data a => Map Loc Expr -> a -> a
 fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
   (ast', state') | null state'.remainingErrors -> ast'
                  | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
+                                                               -- Use PsUnknownMessage
   where
 
 -- TODO: embed the expression in existing or new do-notation
@@ -80,7 +83,7 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
 -- correct do block once the traversal is evaluated
 
     goNoDo :: forall a m . (MonadState FillState m, Data a) => a -> m a
-    goNoDo = gmapM \e -> maybe (goNoDo e) pure =<< runMaybeT (tryInsertDo e)
+    goNoDo e = maybe (gmapM goNoDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     tryInsertDo :: forall a m . (MonadState FillState m, Data a) => a -> MaybeT m a
@@ -95,7 +98,16 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
                   HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ noLocA <$> doStmts)
 
     goDo :: forall a m . (MonadFill m, Data a) => a -> m a
-    goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (tryLExpr e)
+    goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (asum $ ($ e) <$> [tryLExpr, tryStmt])
+
+    tryStmt :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
+    tryStmt e = do
+      Refl <- hoistMaybe (eqT @a @(ExprStmt GhcPs))
+      case e of
+        rec@RecStmt{recS_stmts} -> do
+          recS_stmts' <- traverse (concatMapM addStmts) recS_stmts
+          pure $ rec{recS_stmts = recS_stmts'}
+        _ -> empty
 
     tryLExpr :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
     tryLExpr e = do
@@ -111,11 +123,14 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
         -- If we encounter a `do`, use it instead of a `do` we inserted
         HsDo xd ctxt (L l stmts) -> noLocA . HsDo xd ctxt . L l <$> concatMapM addStmts stmts
         _ -> empty
-      where
-        addStmts :: ExprLStmt GhcPs -> MaybeT m [ExprLStmt GhcPs]
-        addStmts lstmt = do
-          (lstmt', stmts) <- runWriterT (goDo lstmt)
-          pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
+
+    -- Find all !s in the given statement and combine the resulting bind
+    -- statements into a list, with the original statement being the last one
+    -- in the list
+    addStmts :: MonadFill m => ExprLStmt GhcPs -> MaybeT m [ExprLStmt GhcPs]
+    addStmts lstmt = do
+      (lstmt', stmts) <- runWriterT (goDo lstmt)
+      pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
 
 type MonadFill m = (MonadWriter [BindStmt] m, MonadState FillState m)
 
@@ -134,19 +149,18 @@ fromBindStmt (var :<- boundExpr) = BindStmt EpAnnNotUsed varPat lexpr
 -- | Look up an error and remove it from the remaining errors if found
 popError :: MonadFill m => Loc -> MaybeT m Expr
 popError loc = do
-  remaining <- getRemaining
-  let (merr, remaining') = M.updateLookupWithKey (\_ _ -> Nothing) loc remaining
-  putRemaining remaining'
+  remaining <- gets (.remainingErrors)
+  let (merr, remainingErrors) = M.updateLookupWithKey (\_ _ -> Nothing) loc remaining
+  putRemaining remainingErrors
   hoistMaybe merr
   where
-    getRemaining = gets \s -> s.remainingErrors
     putRemaining remaining = modify \s -> s{remainingErrors = remaining}
 
 mkVarName :: Loc -> RdrName
 -- using spaces and ! should make it impossible to overlap with user-defined
 -- names (but could still technically overlap with names introduced by other
 -- plugins)
-mkVarName loc = mkVarUnqual . fsLit $ printf "! in line %d, column %d" loc.line loc.col
+mkVarName loc = mkVarUnqual . fsLit $ printf "<! in line %d, column %d>" loc.line loc.col
 
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure

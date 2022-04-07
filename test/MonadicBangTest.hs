@@ -1,4 +1,6 @@
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE LexicalNegation #-}
 
 module Main (main) where
 
@@ -13,6 +15,8 @@ main :: IO ()
 main = withProgName progName do
   bangWithoutDo
   bangInsideDo
+  bangInsideMDo
+  bangInsideRec
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -25,8 +29,22 @@ bangWithoutDo = assertEq progName !getProgName
 
 bangInsideDo :: HasCallStack => IO ()
 bangInsideDo = do
-  let ioProgName = getProgName
-  assertEq progName !ioProgName
+  let ioProgNameA = getProgName
+  assertEq (progName ++ progName) (!ioProgNameA ++ !ioProgNameB)
+  where
+    ioProgNameB = getProgName
+
+bangInsideMDo :: HasCallStack => IO ()
+bangInsideMDo = assertEq (Just $ replicate 10 -1) $ take 10 <$> mdo
+  xs <- Just (1:xs)
+  pure (negate <$> !(pure xs))
+
+bangInsideRec :: HasCallStack => IO ()
+bangInsideRec = assertEq (Just $ replicate 10 1) $ take 10 <$> do
+  rec xs <- Just (1:xs)
+      pure (negate <$> !(pure xs))
+  pure xs
+
 
 -- TODO:
 -- let; in Idris the do block is around the entire let expression I don't know if I like that though?
