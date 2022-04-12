@@ -61,7 +61,7 @@ bangCase = assertEq "b" case !getA of
   _ -> ""
 
 bangLambda :: HasCallStack => IO ()
-bangLambda = assertEq "ab" $ (\a -> a ++ !getB) !getA
+bangLambda = assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure (!c ++ "!")) getC)
 
 bangLet :: HasCallStack => IO ()
 bangLet = assertEq "abc" !do
@@ -107,6 +107,12 @@ bangLet = assertEq "abc" !do
 -- => potential solution: Disallow using variables that are bound in lambda or let blocks without explicitly surrounding them by a do, this seems like maybe a good idea
 --    Still would be more complicated than just syntax but not *too* much more complicated, just have to keep track of currently bound variables in the state
 --    I mean effectively this is just the same as not doing anything fancy at all, but with better error messages, so from that point of view maybe it's okay because the fancy stuff doesn't actually change semantics
+-- Update from testing via idris: It looks like it can handle variables bound in lambdas, but *not* in let expressions. Do lambdas start a new do block?
+-- I believe that the answer is this:
+-- - Lambda always starts new do block
+-- - let *only* starts new do block for declarations that have a type signature - which I don't like. Not a very intuitive rule.
+-- Since we're already going to be deviating in the latter case - I really don't think type decs should make a difference - I suppose we might as well deviate in the former case.
+-- Not automatically starting a do block in a lambda gives the user more choice: if they want that behavior, they can still start a do block manually.
 
 -- You could keep track in the state monad which variables were introduced together with how (e.g. via lambda, or via function definition, or via case pattern, etc.) and then tell the user
 -- something along the lines of "The variable blah would escape its scope if we did this. Possible fix: Start a do block inside the lambda/function definition/case expression that blah"
