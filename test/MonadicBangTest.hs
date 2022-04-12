@@ -21,6 +21,7 @@ main = do
   bangNested
   bangCase
   bangLambda
+  bangLet
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -62,6 +63,12 @@ bangCase = assertEq "b" case !getA of
 bangLambda :: HasCallStack => IO ()
 bangLambda = assertEq "ab" $ (\a -> a ++ !getB) !getA
 
+bangLet :: HasCallStack => IO ()
+bangLet = assertEq "abc" !do
+  let a = !getA
+  let b _ = !getB
+  let c = !getC in pure (a ++ b b ++ c)
+
 -- DONE:
 -- do
 -- mdo
@@ -70,13 +77,13 @@ bangLambda = assertEq "ab" $ (\a -> a ++ !getB) !getA
 -- case scrutinee
 -- case body
 -- lambda
-
--- TODO:
 -- let; in Idris the do block is around the entire let expression I don't know if I like that though?
 --    There's an infelicity here: on the one hand, it's really useful to have ! not introduce a new do-block inside let inside do
 --    On the other hand, it would be nice if let inside do worked like let...in, and if that worked like where
 --    But where *has* to work like top-level function definitions
 --    In any case, it's probably a good idea to stick to the idris conventions for now
+
+-- TODO:
 -- where
 -- list/monad comprehension (treat like do? idris does.)
 -- case where (treat the same as top level? That's how idris does it)
