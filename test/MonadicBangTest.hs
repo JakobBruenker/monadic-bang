@@ -1,6 +1,7 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE LexicalNegation #-}
+{-# LANGUAGE MonadComprehensions #-}
 
 module Main (main) where
 
@@ -22,6 +23,9 @@ main = do
   bangCase
   bangLambda
   bangLet
+  bangListComp
+  bangMonadComp
+  bangGuards
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -69,7 +73,20 @@ bangLet = assertEq "abc" !do
   let b _ = !getB
   let c = !getC in pure (a ++ b b ++ c)
 
+bangListComp :: HasCallStack => IO ()
+bangListComp = assertEq @[Int]
+  [101, 102, 103, 201, 202, 203, 301, 302, 303]
+  [ ![1,2,3] + y | let y = ![100,200,300] ]
+
+bangMonadComp :: HasCallStack => IO ()
+bangMonadComp = assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]
+
+bangGuards :: HasCallStack => IO ()
+bangGuards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
+           | otherwise = error "guards didn't match"
+
 -- DONE:
+-- guards
 -- do
 -- mdo
 -- rec
@@ -85,7 +102,7 @@ bangLet = assertEq "abc" !do
 
 -- TODO:
 -- where
--- list/monad comprehension (treat like do? idris does.)
+-- list/monad comprehension (treat like do? idris does.) NB: we do things in the "last statement" last, even though they are leftmost
 -- case where (treat the same as top level? That's how idris does it)
 -- view pattern -> seems kinda hard but doable (that is on top level, apart from that it's the same as everything else)
 -- let inside do; In idris this uses the existing do-block, so
@@ -116,3 +133,5 @@ bangLet = assertEq "abc" !do
 
 -- You could keep track in the state monad which variables were introduced together with how (e.g. via lambda, or via function definition, or via case pattern, etc.) and then tell the user
 -- something along the lines of "The variable blah would escape its scope if we did this. Possible fix: Start a do block inside the lambda/function definition/case expression that blah"
+
+-- We're not supporting parallel list comps or transform statements for now

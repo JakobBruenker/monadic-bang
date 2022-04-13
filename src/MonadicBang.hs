@@ -63,13 +63,13 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
     -- Take out the errors we care about, throw the rest back in
     (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
       flip partitionBagWith msgs.psErrors.getMessages \cases
-        err | PsErrBangPatWithoutSpace (ExprLoc (addBang -> loc) expr) <- err.errMsgDiagnostic
-            -> Right (loc, expr)
+        err | PsErrBangPatWithoutSpace lexpr@(ExprLoc (addBang -> loc) _) <- err.errMsgDiagnostic
+            -> Right (loc, lexpr)
             | otherwise -> Left err
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: Data a => Map Loc Expr -> a -> a
+fillHoles :: Data a => Map Loc LExpr -> a -> a
 fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
   (ast', state') | null state'.remainingErrors -> ast'
                  -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
@@ -107,22 +107,30 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
       case e of
         rec@RecStmt{recS_stmts} -> do
           recS_stmts' <- traverse (concatMapM addStmts) recS_stmts
-          pure $ rec{recS_stmts = recS_stmts'}
+          pure rec{recS_stmts = recS_stmts'}
         _ -> empty
 
     tryLExpr :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
     tryLExpr e = do
       Refl <- hoistMaybe (eqT @a @LExpr)
-      ExprLoc loc expr <- pure e
+      lexpr@(ExprLoc loc expr) <- pure e
       case expr of
         -- Replace holes resulting from `!`
         HsUnboundVar _ _ -> do
-          expr' <- goDo =<< popError loc
+          lexpr' <- goDo =<< popError loc
           let name = mkVarName loc
-          tell [name :<- expr']
+          tell [name :<- lexpr']
           goDo $ e $> HsVar noExtField (noLocA name)
         -- If we encounter a `do`, use it instead of a `do` we inserted
-        HsDo xd ctxt (L l stmts) -> noLocA . HsDo xd ctxt . L l <$> concatMapM addStmts stmts
+        HsDo xd ctxt (L l stmts) | isSupported ctxt -> noLocA . HsDo xd ctxt . L l <$> concatMapM addStmts stmts
+                                 | otherwise -> pure lexpr
+          where
+            isSupported = \cases
+              ListComp -> True
+              MonadComp -> True
+              (DoExpr _) -> True
+              (MDoExpr _) -> True
+              _ -> False
         _ -> empty
 
     -- Find all !s in the given statement and combine the resulting bind
@@ -136,19 +144,18 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
 type MonadFill m = (MonadWriter [BindStmt] m, MonadState FillState m)
 
 data FillState = MkFillState
-  { remainingErrors :: Map Loc Expr
+  { remainingErrors :: Map Loc LExpr
   }
 
-data BindStmt = RdrName :<- Expr
+data BindStmt = RdrName :<- LExpr
 
 fromBindStmt :: BindStmt -> ExprStmt GhcPs
-fromBindStmt (var :<- boundExpr) = BindStmt EpAnnNotUsed varPat lexpr
+fromBindStmt (var :<- lexpr) = BindStmt EpAnnNotUsed varPat lexpr
   where
     varPat = noLocA . VarPat noExtField $ noLocA var
-    lexpr = noLocA boundExpr
 
 -- | Look up an error and remove it from the remaining errors if found
-popError :: MonadFill m => Loc -> MaybeT m Expr
+popError :: MonadFill m => Loc -> MaybeT m LExpr
 popError loc = do
   remaining <- gets (.remainingErrors)
   let (merr, remainingErrors) = M.updateLookupWithKey (\_ _ -> Nothing) loc remaining
