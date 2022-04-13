@@ -117,7 +117,7 @@ bangWhere = do
 --   do let a = !getLine
 --      print a
 --   here (a :: String), *not* (a :: IO String)
--- list/monad comprehension (treat like do? idris does.) NB: we do things in the "last statement" last, even though they are leftmost
+-- list/monad comprehension (treat like do? idris does.) NB: we do things in the "last statement" last, even though they are leftmost (same as in Idris)
 -- view pattern seem kinda hard but doable (that is on top level, apart from that it's the same as everything else)
 --   Oop I actually don't think so: While applying the view patterns we don't know yet which guard alternative we're in, so in which one do we put the do?
 --   So that means we just treat them like everything else
@@ -127,6 +127,13 @@ bangWhere = do
 -- TODO:
 -- empty \o/
 -- (however there are still things to do, see below)
+
+-- Hmm in idris case alternatives seem to start a new do block. We're not currently doing it, but it's certainly worth considering.
+-- As usual I think not automatically starting a new do block offers the user more freedom, but it *might* be more intuitive to do it anyway, since that means only the effects in alternatives that actually happen are
+-- executed. I suppose the same applies to if/multiway-if. But then, you could also say the same about let, since it can use guards and whatnot. So I'm not convinced - though I do think it's more intuitive...
+-- Idris doesn't have the let problem, because it doesn't have guards on let
+-- One thing one could consider is not starting a new block in let, *unless* there are guards, maybe not the worst idea
+-- But if not, we should certainly list it as a difference to Idris.
 
 -- one case which I think we won't handle like idris is that for us, a bare !x expression at top level will be treated as do {x' <- x; pure x}
 -- which is equivalent to x. It's a type error in idris. Alternatively we could make it a parse error... since it's not like there's any point in doing it.
@@ -150,7 +157,7 @@ bangWhere = do
 -- Since we're already going to be deviating in the latter case - I really don't think type decs should make a difference - I suppose we might as well deviate in the former case.
 -- Not automatically starting a do block in a lambda gives the user more choice: if they want that behavior, they can still start a do block manually.
 
--- You could keep track in the state monad which variables were introduced together with how (e.g. via lambda, or via function definition, or via case pattern, etc.) and then tell the user
+-- You could keep track in a reader monad which variables were introduced together with how (e.g. via lambda, or via function definition, or via case pattern, etc.) and then tell the user
 -- something along the lines of "The variable blah would escape its scope if we did this. Possible fix: Start a do block inside the lambda/function definition/case expression that blah"
 
 -- We're not supporting parallel list comps or transform statements for now
