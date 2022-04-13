@@ -62,7 +62,7 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
   where
     -- Take out the errors we care about, throw the rest back in
     (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
-      flip partitionBagWith msgs.psErrors.getMessages \cases
+      partitionBagWith ?? msgs.psErrors.getMessages $ \cases
         err | PsErrBangPatWithoutSpace lexpr@(ExprLoc (addBang -> loc) _) <- err.errMsgDiagnostic
             -> Right (loc, lexpr)
             | otherwise -> Left err
@@ -99,15 +99,15 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
                   HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ noLocA <$> doStmts)
 
     goDo :: forall a m . (MonadFill m, Data a) => a -> m a
-    goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (asum $ ($ e) <$> [tryLExpr, tryStmt])
+    goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt, tryGRHSs] ?? e)
 
     tryStmt :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
     tryStmt e = do
       Refl <- hoistMaybe (eqT @a @(ExprStmt GhcPs))
       case e of
-        rec@RecStmt{recS_stmts} -> do
+        RecStmt{recS_stmts} -> do
           recS_stmts' <- traverse (concatMapM addStmts) recS_stmts
-          pure rec{recS_stmts = recS_stmts'}
+          pure e{recS_stmts = recS_stmts'}
         _ -> empty
 
     tryLExpr :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
@@ -133,6 +133,13 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
               (MDoExpr _) -> True
               _ -> False
         _ -> empty
+
+    tryGRHSs :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
+    tryGRHSs e = do
+      Refl <- hoistMaybe (eqT @a @(GRHSs GhcPs LExpr))
+      case e of
+        GRHSs exts grhss localBinds ->
+          GRHSs <$> goDo exts <*> goDo grhss <*> goNoDo localBinds
 
     -- Find all !s in the given statement and combine the resulting bind
     -- statements into a list, with the original statement being the last one
@@ -173,3 +180,6 @@ mkVarName loc = mkVarUnqual . fsLit $ printf "<! from line %d, column %d>" loc.l
 
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
+
+(??) :: Functor f => f (a -> b) -> a -> f b
+fs ?? x = ($ x) <$> fs

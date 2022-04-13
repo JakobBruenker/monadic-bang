@@ -113,10 +113,12 @@ bangViewPat = assertEq 9999 x
 -- view pattern seem kinda hard but doable (that is on top level, apart from that it's the same as everything else)
 --   Oop I actually don't think so: While applying the view patterns we don't know yet which guard alternative we're in, so in which one do we put the do?
 --   So that means we just treat them like everything else
+-- where (i.e. handle GRHSs)
+-- case where (treat the same as top level? That's how idris does it) (also handled by GRHSs)
 
 -- TODO:
--- where
--- case where (treat the same as top level? That's how idris does it)
+-- empty \o/
+-- (however there are still things to do, see below)
 
 -- one case which I think we won't handle like idris is that for us, a bare !x expression at top level will be treated as do {x' <- x; pure x}
 -- which is equivalent to x. It's a type error in idris. Alternatively we could make it a parse error... since it's not like there's any point in doing it.
