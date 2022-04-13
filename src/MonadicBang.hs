@@ -122,8 +122,9 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
           tell [name :<- lexpr']
           goDo $ e $> HsVar noExtField (noLocA name)
         -- If we encounter a `do`, use it instead of a `do` we inserted
-        HsDo xd ctxt (L l stmts) | isSupported ctxt -> noLocA . HsDo xd ctxt . L l <$> concatMapM addStmts stmts
-                                 | otherwise -> pure lexpr
+        HsDo xd ctxt (L l stmts)
+          | isSupported ctxt -> noLocA . HsDo xd ctxt . L l <$> concatMapM addStmts stmts
+          | otherwise -> pure lexpr
           where
             isSupported = \cases
               ListComp -> True

@@ -2,6 +2,7 @@
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE LexicalNegation #-}
 {-# LANGUAGE MonadComprehensions #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Main (main) where
 
@@ -26,6 +27,7 @@ main = do
   bangListComp
   bangMonadComp
   bangGuards
+  bangViewPat
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -85,6 +87,10 @@ bangGuards :: HasCallStack => IO ()
 bangGuards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
            | otherwise = error "guards didn't match"
 
+bangViewPat :: HasCallStack => IO ()
+bangViewPat = assertEq 9999 x
+  where (pure (!succ * !pred) -> x) = 100 :: Int
+
 -- DONE:
 -- guards
 -- do
@@ -99,18 +105,20 @@ bangGuards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
 --    On the other hand, it would be nice if let inside do worked like let...in, and if that worked like where
 --    But where *has* to work like top-level function definitions
 --    In any case, it's probably a good idea to stick to the idris conventions for now
+-- let inside do; In idris this uses the existing do-block, so
+--   do let a = !getLine
+--      print a
+--   here (a :: String), *not* (a :: IO String)
+-- list/monad comprehension (treat like do? idris does.) NB: we do things in the "last statement" last, even though they are leftmost
+-- view pattern seem kinda hard but doable (that is on top level, apart from that it's the same as everything else)
+--   Oop I actually don't think so: While applying the view patterns we don't know yet which guard alternative we're in, so in which one do we put the do?
+--   So that means we just treat them like everything else
 
 -- TODO:
 -- where
--- list/monad comprehension (treat like do? idris does.) NB: we do things in the "last statement" last, even though they are leftmost
 -- case where (treat the same as top level? That's how idris does it)
--- view pattern -> seems kinda hard but doable (that is on top level, apart from that it's the same as everything else)
--- let inside do; In idris this uses the existing do-block, so
--- do let a = !getLine
---    print a
--- here (a :: String), *not* (a :: IO String)
 
--- The one case which I think I won't handle like idris is that for us, a bare !x expression at top level will be treated as do {x' <- x; pure x}
+-- one case which I think we won't handle like idris is that for us, a bare !x expression at top level will be treated as do {x' <- x; pure x}
 -- which is equivalent to x. It's a type error in idris. Alternatively we could make it a parse error... since it's not like there's any point in doing it.
 
 -- You probably have to eta expand, i.e. you'll have to write `f a = (,) !b a` instead of `f = (,) !b` - at the top level. Not in `let`s though.
