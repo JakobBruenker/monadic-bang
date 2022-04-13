@@ -28,6 +28,7 @@ main = do
   bangMonadComp
   bangGuards
   bangViewPat
+  bangWhere
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -91,6 +92,13 @@ bangViewPat :: HasCallStack => IO ()
 bangViewPat = assertEq 9999 x
   where (pure (!succ * !pred) -> x) = 100 :: Int
 
+bangWhere :: HasCallStack => IO ()
+bangWhere = do
+  c <- getC
+  assertEq "[2,3,4]c" $ show list ++ c
+  where
+    list = [![1,2,3] + 1 :: Int]
+
 -- DONE:
 -- guards
 -- do
@@ -122,6 +130,7 @@ bangViewPat = assertEq 9999 x
 
 -- one case which I think we won't handle like idris is that for us, a bare !x expression at top level will be treated as do {x' <- x; pure x}
 -- which is equivalent to x. It's a type error in idris. Alternatively we could make it a parse error... since it's not like there's any point in doing it.
+-- Or - perhaps best - we could add a parse warning
 
 -- You probably have to eta expand, i.e. you'll have to write `f a = (,) !b a` instead of `f = (,) !b` - at the top level. Not in `let`s though.
 -- ^ this is also true in idris
