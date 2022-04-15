@@ -17,20 +17,20 @@ getC = pure "c"
 
 main :: IO ()
 main = do
-  bangWithoutDo
-  bangInsideDo
-  bangInsideMDo
-  bangInsideRec
-  bangNested
-  bangCase
-  bangLambda
-  bangLet
-  bangListComp
-  bangMonadComp
-  bangParListComp
-  bangGuards
-  bangViewPat
-  bangWhere
+  withoutDo
+  insideDo
+  insideMDo
+  insideRec
+  nested
+  insideCase
+  lambda
+  insideLet
+  listComp
+  monadComp
+  parListComp
+  guards
+  viewPat
+  insideWhere
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -38,69 +38,71 @@ assertEq expected actual
   | otherwise = withFrozenCallStack do
       error $ "Expected " <> show expected <> ", but got " <> show actual
 
-bangWithoutDo :: HasCallStack => IO ()
-bangWithoutDo = assertEq "a" !getA
+type Test = HasCallStack => IO ()
 
-bangInsideDo :: HasCallStack => IO ()
-bangInsideDo = do
+withoutDo :: Test
+withoutDo = assertEq "a" !getA
+
+insideDo :: Test
+insideDo = do
   let ioA = getA
       nonIOC = !getC
   assertEq "abc" (!ioA ++ !ioB ++ nonIOC)
   where
     ioB = getB
 
-bangInsideMDo :: HasCallStack => IO ()
-bangInsideMDo = assertEq (Just $ replicate @Int 10 -1) $ take 10 <$> mdo
+insideMDo :: Test
+insideMDo = assertEq (Just $ replicate @Int 10 -1) $ take 10 <$> mdo
   xs <- Just (1:xs)
   pure (negate <$> !(pure xs))
 
-bangInsideRec :: HasCallStack => IO ()
-bangInsideRec = assertEq (Just $ take @Int 10 $ cycle [1, -1]) $ take 10 <$> do
+insideRec :: Test
+insideRec = assertEq (Just $ take @Int 10 $ cycle [1, -1]) $ take 10 <$> do
   rec xs <- Just (1:ys)
       ys <- pure (negate <$> !(pure xs))
   pure xs
 
-bangNested :: HasCallStack => IO ()
-bangNested = assertEq "Ab"
-                      !(pure (!(fmap toUpper <$> !(pure getA)) ++ !(!(pure getB))))
+nested :: Test
+nested = assertEq "Ab"
+                  !(pure (!(fmap toUpper <$> !(pure getA)) ++ !(!(pure getB))))
 
-bangCase :: HasCallStack => IO ()
-bangCase = assertEq "b" case !getA of
+insideCase :: Test
+insideCase = assertEq "b" case !getA of
   something | something == !getA -> !getB
   _ -> ""
 
-bangLambda :: HasCallStack => IO ()
-bangLambda = assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure (!c ++ "!")) getC)
+lambda :: Test
+lambda = assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure (!c ++ "!")) getC)
 
-bangLet :: HasCallStack => IO ()
-bangLet = assertEq "abc" !do
+insideLet :: Test
+insideLet = assertEq "abc" !do
   let a = !getA
   let b _ = !getB
   let c = !getC in pure (a ++ b b ++ c)
 
-bangListComp :: HasCallStack => IO ()
-bangListComp = assertEq @[Int]
+listComp :: Test
+listComp = assertEq @[Int]
   [101, 102, 103, 201, 202, 203, 301, 302, 303]
   [ ![1,2,3] + y | let y = ![100,200,300] ]
 
-bangMonadComp :: HasCallStack => IO ()
-bangMonadComp = assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]
+monadComp :: Test
+monadComp = assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]
 
-bangParListComp :: HasCallStack => IO ()
-bangParListComp = assertEq @[Int]
+parListComp :: Test
+parListComp = assertEq @[Int]
   [11111, 21111, 12111, 22111, 11221, 21221, 12221, 22221]
   [ x + y + w + ![1000,2000] + ![10000,20000] | let x = ![1,2], let w = ![10,20] | let y = ![100,200] ]
 
-bangGuards :: HasCallStack => IO ()
-bangGuards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
+guards :: Test
+guards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
            | otherwise = error "guards didn't match"
 
-bangViewPat :: HasCallStack => IO ()
-bangViewPat = assertEq 9999 x
+viewPat :: Test
+viewPat = assertEq 9999 x
   where (pure (!succ * !pred) -> x) = 100 :: Int
 
-bangWhere :: HasCallStack => IO ()
-bangWhere = do
+insideWhere :: Test
+insideWhere = do
   c <- getC
   assertEq "[2,3,4]c" $ show list ++ c
   where
@@ -199,4 +201,4 @@ bangWhere = do
 -- something along the lines of "The variable blah would escape its scope if we did this. Possible fix: Start a do block inside the lambda/function definition/case expression that blah"
 
 -- We don't have any special handling for transform statements for now
--- Parallel list/monad comps are handled such that first all the parallel statements are done, and then this is treated as a regular in series statement with the last statement, including any bangs in the last statement.
+-- Parallel list/monad comps are handled such that first all the parallel statements are done, and then this is treated as a regular in series statement with the last statement, including any s in the last statement.

@@ -74,8 +74,9 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
 fillHoles :: Data a => Map Loc LExpr -> a -> a
 fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
   (ast', state') | null state'.remainingErrors -> ast'
-                 | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
-                                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
+                 -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
+                 --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
+                 | otherwise -> trace "XXX JB WARNING" ast'
   where
 
 -- TODO: embed the expression in existing or new do-notation
