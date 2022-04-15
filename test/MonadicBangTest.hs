@@ -2,6 +2,7 @@
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE LexicalNegation #-}
 {-# LANGUAGE MonadComprehensions #-}
+{-# LANGUAGE ParallelListComp #-}
 {-# LANGUAGE ViewPatterns #-}
 
 module Main (main) where
@@ -26,6 +27,7 @@ main = do
   bangLet
   bangListComp
   bangMonadComp
+  bangParListComp
   bangGuards
   bangViewPat
   bangWhere
@@ -84,6 +86,11 @@ bangListComp = assertEq @[Int]
 bangMonadComp :: HasCallStack => IO ()
 bangMonadComp = assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]
 
+bangParListComp :: HasCallStack => IO ()
+bangParListComp = assertEq @[Int]
+  [11111, 21111, 12111, 22111, 11221, 21221, 12221, 22221]
+  [ x + y + w + ![1000,2000] + ![10000,20000] | let x = ![1,2], let w = ![10,20] | let y = ![100,200] ]
+
 bangGuards :: HasCallStack => IO ()
 bangGuards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
            | otherwise = error "guards didn't match"
@@ -132,8 +139,39 @@ bangWhere = do
 -- As usual I think not automatically starting a new do block offers the user more freedom, but it *might* be more intuitive to do it anyway, since that means only the effects in alternatives that actually happen are
 -- executed. I suppose the same applies to if/multiway-if. But then, you could also say the same about let, since it can use guards and whatnot. So I'm not convinced - though I do think it's more intuitive...
 -- Idris doesn't have the let problem, because it doesn't have guards on let
--- One thing one could consider is not starting a new block in let, *unless* there are guards, maybe not the worst idea
--- But if not, we should certainly list it as a difference to Idris.
+-- One thing one could consider is not starting a new block in let, *unless* there are guards, maybe not the worst idea. Of course in that case, we should also think about the right approach for lambdas again.
+-- But then you should also think about things like `let f x = !x + 1`. Like, should that be different from `let f = \x -> !x + 1`? Maybe.
+-- Perhaps a good heuristic is to think about what you'd expect in a (strict) imperative language.
+-- I mean, you could also just be super consistent and say if you want to have something like let without initiating a do block, you have to write
+-- Here's one cool idea: Only don't start a new do block if it's a strict pattern/variable binding
+-- btw `let (_, _) = undefined` is different from `let !(_, _) = undefined`, I didn't know.
+-- because those *have* to have their body evaluated. Still not sure then about guards though. Best guess is that should still start a do block.
+-- But at that point maybe it'd just be better to not care about strict/non-strict and just do it for pattern/var bindings in general.
+-- x <- pure ... instead of let x = ....
+-- But if we decide to do it differently from idris, we should certainly list it as a difference.
+
+-- You could also go in a completely different direction and handle it more like arrow desugaring, which, while fairly complex, is almost what I'm leaning towards:
+--
+-- if you have
+--   let x = if cond
+--     then !a
+--     else !b + !c
+--
+-- then this would be desugared into
+--
+--   if_res <- if cond
+--     then Left <$> a
+--     else Right <$> (#b, c#)
+--   let x = case if_res of
+--     Left a -> a
+--     Right (#b, c#) -> b + c
+--
+-- The one caveat here is that this doesn't take care of laziness, i.e. the effects are still run even  if x isn't used, but maybe that's okay.
+-- Question: Is this only applicable to guards/if/case, or also to lambdas/functions?
+-- I'm fairly confident that this does not apply to lambdas. So then you would have:
+-- - lambdas/lets with at least one argument start a new do-block
+-- - if/case/multiway-if/let without arguments/guards don't start a do-block
+-- I think I can live with that.
 
 -- one case which I think we won't handle like idris is that for us, a bare !x expression at top level will be treated as do {x' <- x; pure x}
 -- which is equivalent to x. It's a type error in idris. Alternatively we could make it a parse error... since it's not like there's any point in doing it.
@@ -160,4 +198,5 @@ bangWhere = do
 -- You could keep track in a reader monad which variables were introduced together with how (e.g. via lambda, or via function definition, or via case pattern, etc.) and then tell the user
 -- something along the lines of "The variable blah would escape its scope if we did this. Possible fix: Start a do block inside the lambda/function definition/case expression that blah"
 
--- We're not supporting parallel list comps or transform statements for now
+-- We don't have any special handling for transform statements for now
+-- Parallel list/monad comps are handled such that first all the parallel statements are done, and then this is treated as a regular in series statement with the last statement, including any bangs in the last statement.

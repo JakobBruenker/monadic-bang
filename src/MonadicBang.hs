@@ -28,6 +28,7 @@ import GHC.Utils.Monad (concatMapM)
 import Text.Printf
 
 import Debug.Trace
+import GHC.Hs.Dump
 
 -- TODO: Write user manual as haddock comment
 
@@ -58,11 +59,12 @@ spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
 replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
+  -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
   pure $ ParsedResult (HsParsedModule (let m' = (fillHoles fills mod') in trace (showSDocUnsafe $ ppr m') m') files) msgs{psErrors}
   where
     -- Take out the errors we care about, throw the rest back in
     (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
-      partitionBagWith ?? msgs.psErrors.getMessages $ \cases
+      (partitionBagWith ?? msgs.psErrors.getMessages) \cases
         err | PsErrBangPatWithoutSpace lexpr@(ExprLoc (addBang -> loc) _) <- err.errMsgDiagnostic
             -> Right (loc, lexpr)
             | otherwise -> Left err
@@ -72,9 +74,8 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
 fillHoles :: Data a => Map Loc LExpr -> a -> a
 fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
   (ast', state') | null state'.remainingErrors -> ast'
-                 -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
-                 --                                               -- Use PsUnknownMessage
-                 | otherwise -> trace "XXX JB WARNING" ast'
+                 | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
+                                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
   where
 
 -- TODO: embed the expression in existing or new do-notation
@@ -106,14 +107,22 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
       Refl <- hoistMaybe (eqT @a @(ExprStmt GhcPs))
       case e of
         RecStmt{recS_stmts} -> do
-          recS_stmts' <- traverse (concatMapM addStmts) recS_stmts
+          recS_stmts' <- traverse addStmts recS_stmts
           pure e{recS_stmts = recS_stmts'}
+        ParStmt xp stmtBlocks zipper bind -> do
+          stmtsBlocks' <- traverse addParStmts stmtBlocks
+          pure $ ParStmt xp stmtsBlocks' zipper bind
+          where
+            addParStmts :: ParStmtBlock GhcPs GhcPs -> MaybeT m (ParStmtBlock GhcPs GhcPs)
+            addParStmts (ParStmtBlock xb stmts vars ret) = do
+              stmts' <- addStmts stmts
+              pure $ ParStmtBlock xb stmts' vars ret
         _ -> empty
 
     tryLExpr :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
     tryLExpr e = do
       Refl <- hoistMaybe (eqT @a @LExpr)
-      lexpr@(ExprLoc loc expr) <- pure e
+      ExprLoc loc expr <- pure e
       case expr of
         -- Replace holes resulting from `!`
         HsUnboundVar _ _ -> do
@@ -122,18 +131,10 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
           tell [name :<- lexpr']
           goDo $ e $> HsVar noExtField (noLocA name)
         -- If we encounter a `do`, use it instead of a `do` we inserted
-        HsDo xd ctxt (L l stmts)
-          | isSupported ctxt -> noLocA . HsDo xd ctxt . L l <$> concatMapM addStmts stmts
-          | otherwise -> pure lexpr
-          where
-            isSupported = \cases
-              ListComp -> True
-              MonadComp -> True
-              (DoExpr _) -> True
-              (MDoExpr _) -> True
-              _ -> False
+        HsDo xd ctxt (L l stmts) -> (e $>) . HsDo xd ctxt . L l <$> addStmts stmts
         _ -> empty
 
+    -- This lets us start new do-blocks in where blocks
     tryGRHSs :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
     tryGRHSs e = do
       Refl <- hoistMaybe (eqT @a @(GRHSs GhcPs LExpr))
@@ -141,11 +142,11 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
         GRHSs exts grhss localBinds ->
           GRHSs <$> goDo exts <*> goDo grhss <*> goNoDo localBinds
 
-    -- Find all !s in the given statement and combine the resulting bind
-    -- statements into a list, with the original statement being the last one
-    -- in the list
-    addStmts :: MonadFill m => ExprLStmt GhcPs -> MaybeT m [ExprLStmt GhcPs]
-    addStmts lstmt = do
+    -- Find all !s in the given statements and combine the resulting bind
+    -- statements into listss, with the original statements being the last one
+    -- in each list - then concatenate these lists
+    addStmts :: MonadFill m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts = concatMapM \lstmt -> do
       (lstmt', stmts) <- runWriterT (goDo lstmt)
       pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
 
