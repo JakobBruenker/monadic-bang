@@ -62,7 +62,7 @@ spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
 replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
   -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
-  pure $ ParsedResult (HsParsedModule (let m' = (fillHoles fills mod') in trace (showSDocUnsafe $ ppr m') m') files) msgs{psErrors}
+  pure $ ParsedResult (HsParsedModule (let m' = fillHoles fills mod' in trace (showSDocUnsafe $ ppr m') m') files) msgs{psErrors}
   where
     -- Take out the errors we care about, throw the rest back in
     (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
@@ -73,12 +73,12 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: Data a => Map Loc LExpr -> a -> a
-fillHoles fillers ast = case run $ runState (MkFillState fillers) (goNoDo ast) of
-  (state', ast') | null state'.remainingErrors -> ast'
-                 -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
-                 --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
-                 | otherwise -> trace "XXX JB WARNING" ast'
+fillHoles :: Data a => Errors -> a -> a
+fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
+  (remainingErrs, ast') | null remainingErrs -> ast'
+                        -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
+                        --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
+                        | otherwise -> trace "XXX JB WARNING" ast'
   where
 
 -- TODO: embed the expression in existing or new do-notation
@@ -87,13 +87,13 @@ fillHoles fillers ast = case run $ runState (MkFillState fillers) (goNoDo ast) o
 -- adding the bindings we need to the monadic context so we can construct the
 -- correct do block once the traversal is evaluated
 
-    goNoDo :: forall a sig m . (Has (State FillState) sig m, Data a) => a -> m a
+    goNoDo :: forall a sig m . (Has (State Errors) sig m, Data a) => a -> m a
     goNoDo e = maybe (gmapM goNoDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     -- We use MaybeT since it has the MonadFail instance we want, as opposed to
     -- the other handlers for 'Empty'
-    tryInsertDo :: forall a sig m . (Has (State FillState) sig m, Data a) => a -> MaybeT m a
+    tryInsertDo :: forall a sig m . (Has (State Errors) sig m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       (appEndo ?? [] -> stmts, expr') <- runWriter (goDo expr)
@@ -150,18 +150,14 @@ fillHoles fillers ast = case run $ runState (MkFillState fillers) (goNoDo ast) o
     -- Find all !s in the given statements and combine the resulting bind
     -- statements into listss, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: MonadFill sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: Has (State Errors) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
       (appEndo ?? [] -> stmts, lstmt') <- runWriter (goDo lstmt)
       pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
 
--- type MonadFill m = (MonadWriter [BindStmt] m, MonadState FillState m)
-type MonadFill sig m = Has (Writer (Endo [BindStmt]) :+: State FillState) sig m
+type MonadFill sig m = Has (Writer (Endo [BindStmt]) :+: State Errors) sig m
 
--- TODO replace with a type Errors
-data FillState = MkFillState
-  { remainingErrors :: Map Loc LExpr
-  }
+type Errors = Map Loc LExpr
 
 data BindStmt = RdrName :<- LExpr
 
@@ -173,12 +169,9 @@ fromBindStmt (var :<- lexpr) = BindStmt EpAnnNotUsed varPat lexpr
 -- | Look up an error and remove it from the remaining errors if found
 popError :: MonadFill sig m => Loc -> MaybeT m LExpr
 popError loc = do
-  remaining <- gets @FillState (.remainingErrors)
-  let (merr, remainingErrors) = M.updateLookupWithKey (\_ _ -> Nothing) loc remaining
-  putRemaining remainingErrors
+  (merr, remainingErrs) <- M.updateLookupWithKey (\_ _ -> Nothing) loc <$> get
+  put remainingErrs
   hoistMaybe merr
-  where
-    putRemaining remaining = modify \s -> s{remainingErrors = remaining}
 
 mkVarName :: Loc -> RdrName
 -- using spaces and special characters should make it impossible to overlap
