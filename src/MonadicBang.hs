@@ -104,10 +104,10 @@ fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
              in pure . noLocA $
                   HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ noLocA <$> doStmts)
 
-    goDo :: forall a sig m . (MonadFill sig m, Data a) => a -> m a
+    goDo :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
     goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt, tryGRHSs] ?? e)
 
-    tryStmt :: forall a sig m . (MonadFill sig m, Data a) => a -> MaybeT m a
+    tryStmt :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryStmt e = do
       Refl <- hoistMaybe (eqT @a @(ExprStmt GhcPs))
       case e of
@@ -124,7 +124,7 @@ fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
               pure $ ParStmtBlock xb stmts' vars ret
         _ -> empty
 
-    tryLExpr :: forall a sig m . (MonadFill sig m, Data a) => a -> MaybeT m a
+    tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryLExpr e = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       ExprLoc loc expr <- pure e
@@ -140,7 +140,7 @@ fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
         _ -> empty
 
     -- This lets us start new do-blocks in where blocks
-    tryGRHSs :: forall a sig m . (MonadFill sig m, Data a) => a -> MaybeT m a
+    tryGRHSs :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryGRHSs e = do
       Refl <- hoistMaybe (eqT @a @(GRHSs GhcPs LExpr))
       case e of
@@ -155,7 +155,7 @@ fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
       (appEndo ?? [] -> stmts, lstmt') <- runWriter (goDo lstmt)
       pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
 
-type MonadFill sig m = Has (Writer (Endo [BindStmt]) :+: State Errors) sig m
+type Fill = Writer (Endo [BindStmt]) :+: State Errors
 
 type Errors = Map Loc LExpr
 
@@ -167,7 +167,7 @@ fromBindStmt (var :<- lexpr) = BindStmt EpAnnNotUsed varPat lexpr
     varPat = noLocA . VarPat noExtField $ noLocA var
 
 -- | Look up an error and remove it from the remaining errors if found
-popError :: MonadFill sig m => Loc -> MaybeT m LExpr
+popError :: Has Fill sig m => Loc -> MaybeT m LExpr
 popError loc = do
   (merr, remainingErrs) <- M.updateLookupWithKey (\_ _ -> Nothing) loc <$> get
   put remainingErrs
