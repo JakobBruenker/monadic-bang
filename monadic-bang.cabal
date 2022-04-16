@@ -73,8 +73,7 @@ library
                       ghc >= 9.3,
                       containers ^>= 0.6.4.1,
                       transformers ^>= 0.5.6.2,
-                      mtl ^>= 2.2.2,
-                      writer-cps-mtl ^>= 0.1.1.6,
+                      fused-effects ^>= 1.1.1.2,
 
     -- Directories containing source files.
     hs-source-dirs:   src

@@ -13,12 +13,14 @@ module MonadicBang (plugin) where
 
 import Control.Applicative
 import Control.Monad.Trans.Maybe
-import Control.Monad.State.Strict
-import Control.Monad.Writer.CPS
+import Control.Carrier.Writer.Strict
+import Control.Carrier.State.Strict
+import Control.Effect.Sum hiding (L)
 import Data.Data
 import Data.Functor
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
+import Data.Monoid
 import GHC
 import GHC.Data.Bag
 import GHC.Parser.Errors.Types
@@ -72,8 +74,8 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
 fillHoles :: Data a => Map Loc LExpr -> a -> a
-fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
-  (ast', state') | null state'.remainingErrors -> ast'
+fillHoles fillers ast = case run $ runState (MkFillState fillers) (goNoDo ast) of
+  (state', ast') | null state'.remainingErrors -> ast'
                  -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
                  --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
                  | otherwise -> trace "XXX JB WARNING" ast'
@@ -85,14 +87,16 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
 -- adding the bindings we need to the monadic context so we can construct the
 -- correct do block once the traversal is evaluated
 
-    goNoDo :: forall a m . (MonadState FillState m, Data a) => a -> m a
+    goNoDo :: forall a sig m . (Has (State FillState) sig m, Data a) => a -> m a
     goNoDo e = maybe (gmapM goNoDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
-    tryInsertDo :: forall a m . (MonadState FillState m, Data a) => a -> MaybeT m a
+    -- We use MaybeT since it has the MonadFail instance we want, as opposed to
+    -- the other handlers for 'Empty'
+    tryInsertDo :: forall a sig m . (Has (State FillState) sig m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
       Refl <- hoistMaybe (eqT @a @LExpr)
-      (expr', stmts) <- runWriterT (goDo expr)
+      (appEndo ?? [] -> stmts, expr') <- runWriter (goDo expr)
       if null stmts
         then pure expr'
         else let lastStmt = BodyStmt noExtField expr' noExtField noExtField
@@ -100,10 +104,10 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
              in pure . noLocA $
                   HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ noLocA <$> doStmts)
 
-    goDo :: forall a m . (MonadFill m, Data a) => a -> m a
+    goDo :: forall a sig m . (MonadFill sig m, Data a) => a -> m a
     goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt, tryGRHSs] ?? e)
 
-    tryStmt :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
+    tryStmt :: forall a sig m . (MonadFill sig m, Data a) => a -> MaybeT m a
     tryStmt e = do
       Refl <- hoistMaybe (eqT @a @(ExprStmt GhcPs))
       case e of
@@ -120,7 +124,7 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
               pure $ ParStmtBlock xb stmts' vars ret
         _ -> empty
 
-    tryLExpr :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
+    tryLExpr :: forall a sig m . (MonadFill sig m, Data a) => a -> MaybeT m a
     tryLExpr e = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       ExprLoc loc expr <- pure e
@@ -129,14 +133,14 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
         HsUnboundVar _ _ -> do
           lexpr' <- goDo =<< popError loc
           let name = mkVarName loc
-          tell [name :<- lexpr']
+          tellOne (name :<- lexpr')
           goDo $ e $> HsVar noExtField (noLocA name)
         -- If we encounter a `do`, use it instead of a `do` we inserted
         HsDo xd ctxt (L l stmts) -> (e $>) . HsDo xd ctxt . L l <$> addStmts stmts
         _ -> empty
 
     -- This lets us start new do-blocks in where blocks
-    tryGRHSs :: forall a m . (MonadFill m, Data a) => a -> MaybeT m a
+    tryGRHSs :: forall a sig m . (MonadFill sig m, Data a) => a -> MaybeT m a
     tryGRHSs e = do
       Refl <- hoistMaybe (eqT @a @(GRHSs GhcPs LExpr))
       case e of
@@ -146,13 +150,15 @@ fillHoles fillers ast = case runState (goNoDo ast) (MkFillState fillers) of
     -- Find all !s in the given statements and combine the resulting bind
     -- statements into listss, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: MonadFill m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: MonadFill sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
-      (lstmt', stmts) <- runWriterT (goDo lstmt)
+      (appEndo ?? [] -> stmts, lstmt') <- runWriter (goDo lstmt)
       pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
 
-type MonadFill m = (MonadWriter [BindStmt] m, MonadState FillState m)
+-- type MonadFill m = (MonadWriter [BindStmt] m, MonadState FillState m)
+type MonadFill sig m = Has (Writer (Endo [BindStmt]) :+: State FillState) sig m
 
+-- TODO replace with a type Errors
 data FillState = MkFillState
   { remainingErrors :: Map Loc LExpr
   }
@@ -165,9 +171,9 @@ fromBindStmt (var :<- lexpr) = BindStmt EpAnnNotUsed varPat lexpr
     varPat = noLocA . VarPat noExtField $ noLocA var
 
 -- | Look up an error and remove it from the remaining errors if found
-popError :: MonadFill m => Loc -> MaybeT m LExpr
+popError :: MonadFill sig m => Loc -> MaybeT m LExpr
 popError loc = do
-  remaining <- gets (.remainingErrors)
+  remaining <- gets @FillState (.remainingErrors)
   let (merr, remainingErrors) = M.updateLookupWithKey (\_ _ -> Nothing) loc remaining
   putRemaining remainingErrors
   hoistMaybe merr
@@ -182,6 +188,9 @@ mkVarName loc = mkVarUnqual . fsLit $ printf "<! from line %d, column %d>" loc.l
 
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
+
+tellOne :: Has (Writer (Endo [w])) sig m => w -> m ()
+tellOne x = tell $ Endo (x:)
 
 (??) :: Functor f => f (a -> b) -> a -> f b
 fs ?? x = ($ x) <$> fs
