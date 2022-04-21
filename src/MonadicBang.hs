@@ -4,6 +4,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE StrictData #-}
@@ -16,15 +17,18 @@ import Control.Monad.Trans.Maybe
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Effect.Sum hiding (L)
+import Data.Bifunctor
 import Data.Data
-import Data.Functor
+import Data.Foldable
+import Data.Function
+import Data.List.NonEmpty (nonEmpty)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.Monoid
 import GHC
 import GHC.Data.Bag
 import GHC.Parser.Errors.Types
-import GHC.Plugins hiding (Expr, empty)
+import GHC.Plugins hiding (Expr, Let, empty)
 import GHC.Types.Error
 import GHC.Utils.Monad (concatMapM)
 import Text.Printf
@@ -62,6 +66,7 @@ spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
 replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
   -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
+  -- TODO: have a second module MonadicBangDebug, that does the same thing but also pretty prints the modified AST
   pure $ ParsedResult (HsParsedModule (let m' = fillHoles fills mod' in trace (showSDocUnsafe $ ppr m') m') files) msgs{psErrors}
   where
     -- Take out the errors we care about, throw the rest back in
@@ -74,21 +79,15 @@ replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
 fillHoles :: Data a => Errors -> a -> a
-fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
-  (remainingErrs, ast') | null remainingErrs -> ast'
-                        -- | otherwise -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
-                        --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
-                        | otherwise -> trace "XXX JB WARNING" ast'
+fillHoles fillers ast = case run $ runState fillers (evacWithNewDo ast) of
+  (remainingErrs, ast') -> case nonEmpty (toList remainingErrs) of
+    Nothing -> ast'
+    -- Just neErrs -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
+    --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
+    Just _neErrs -> trace "XXX JB WARNING" ast'
   where
-
--- TODO: embed the expression in existing or new do-notation
--- Approach: in tryFillHole, whenever we encounter let/where/do/etc.,
--- make a separate monadic traversal through the subtree with a writer monad,
--- adding the bindings we need to the monadic context so we can construct the
--- correct do block once the traversal is evaluated
-
-    goNoDo :: forall a sig m . (Has (State Errors) sig m, Data a) => a -> m a
-    goNoDo e = maybe (gmapM goNoDo $ e) pure =<< runMaybeT (tryInsertDo e)
+    evacWithNewDo :: forall a sig m . (Has (State Errors) sig m, Data a) => a -> m a
+    evacWithNewDo e = maybe (gmapM evacWithNewDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     -- We use MaybeT since it has the MonadFail instance we want, as opposed to
@@ -96,16 +95,22 @@ fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
     tryInsertDo :: forall a sig m . (Has (State Errors) sig m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
       Refl <- hoistMaybe (eqT @a @LExpr)
-      (appEndo ?? [] -> stmts, expr') <- runWriter (goDo expr)
-      if null stmts
-        then pure expr'
-        else let lastStmt = BodyStmt noExtField expr' noExtField noExtField
-                 doStmts = (fromBindStmt <$> stmts) ++ [lastStmt]
-             in pure . noLocA $
-                  HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ noLocA <$> doStmts)
+      (fromDList -> stmts, expr') <- runWriter (evac expr)
+      case nonEmpty stmts of
+        Nothing -> pure expr'
+        Just neStmts ->
+          -- TODO [case stmt] if we want to not touch case expressions that are statements, we need to run evac on this (located!) BodyStmt
+          --   ...Except I'm not sure that makes sense because we're running evac on the expression to find out whether we have to turn it into a statement at all (and I certainly don't want two passes)
+          --   I think it's best if we just accept that this will have separate binds. You could tell case via Reader that it shouldn't do it here or something, but then it would depend on whether or
+          --   not the case itself has bands... It gets complicated fast.
+          --   Oh! But I think if we use ! in the case we can automatically rely on it being inside a BodyStmt (or at least of a monadic type), so we can always do the simpler thing if we start here
+          let lastStmt = BodyStmt noExtField expr' noExtField noExtField
+              doStmts = (fromBindStmt <$> toList neStmts) ++ [noLocA lastStmt]
+           in pure . noLocA $
+                HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA doStmts)
 
-    goDo :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
-    goDo e = maybe (gmapM goDo $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt, tryGRHSs] ?? e)
+    evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
+    evac e = maybe (gmapM evac $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt, tryGRHSs] ?? e)
 
     tryStmt :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryStmt e = do
@@ -128,43 +133,200 @@ fillHoles fillers ast = case run $ runState fillers (goNoDo ast) of
     tryLExpr e = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       ExprLoc loc expr <- pure e
+      L l _ <- pure e
       case expr of
         -- Replace holes resulting from `!`
         HsUnboundVar _ _ -> do
-          lexpr' <- goDo =<< popError loc
-          let name = mkVarName loc
+          lexpr' <- evac =<< popError loc
+          let name = bangVar lexpr' loc
           tellOne (name :<- lexpr')
-          goDo $ e $> HsVar noExtField (noLocA name)
-        -- If we encounter a `do`, use it instead of a `do` we inserted
-        HsDo xd ctxt (L l stmts) -> (e $>) . HsDo xd ctxt . L l <$> addStmts stmts
+          evac . L l $  HsVar noExtField (noLocA name)
+        -- For case, we only bind the actions in the alternative that is
+        -- actually chosen - as well as any actions used in view patterns or
+        -- guards for that or previous alternatives
+        -- TODO: The HsDo constructed by this should take into account whether or not we're inside a qualifiedDo
+        --       by putting the module name inside reader
+        -- TODO: ideally we only want to transform HsCase when it's actually necessary
+        --       by writing to a different writer (Any newtype) that records whether or not we have to
+        -- TODO: If this case expression is a statement in a do block, we don't need to do any transformations just the idris treatment is enough
+        --       However, the same is true if it's just preceded by "id" or more generally has a monadic type, so we can't handle this consistently anyway, so maybe we just always want to treat it the same?
+        --       Especially when you keep in mind that even inside do blocks, you can actually have non-monadic stuff (e.g. "do case () of () -> 4") EXCEPT! That's not true anymore as soon as you use ! inside the do
+        --       see TODO [case stmt] for more questionable circumstances
+        -- TODO: Technically, you could also split up nested patterns, such that in (Just (!foo -> X)), !foo is only executed in the Just case
+        --       seems doable
+        -- TODO: we might get unused warnings with the scrutinee if we're not careful. I guess we'll have to traverse the tree to see if the scrutinee is being used...?
+        -- -- TODO: we might get unused warnings with the scrutinee if we're not careful. I guess we'll have to traverse the tree to see if the scrutinee is being used...?
+        -- HsCase xc scrut mg -> do
+        --   scrut' <- evac scrut
+        --   (lambdas, mg') <- evacMatchGroup mg
+        --   let binds = locVar "binds for case" loc
+        --       bindsExpr = L l $ HsCase xc scrut' mg'
+        --       bindsVar = noLocA . HsVar noExtField $ noLocA binds
+        --   tellOne (binds :<- bindsExpr)
+        -- If we encounter a `do`, use that instead of a `do` we inserted
+        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> traverse addStmts stmts
         _ -> empty
+
+
+--     evacMatchGroup :: Has Fill sig m => MatchGroup GhcPs LExpr -> m ([LExpr], MatchGroup GhcPs LExpr)
+--     evacMatchGroup mg@MG{mg_alts} = do
+--       let L l alts = mg_alts
+--       (binds, alts') <- evacAlts alts
+--       traverse_ tellOne binds
+--       pure ([], mg{mg_alts = L l alts'})
+--       where
+--         -- Returns any binds from the first alternative as well as the modified matches
+--         evacAlts :: forall sig m . Has (State Errors) sig m => [LMatch GhcPs LExpr] -> m ([BindStmt], [LMatch GhcPs LExpr])
+--         evacAlts (lmatch : lmatches) = do
+--           (nonEmpty . fromDList -> firstAltBinds, pats') <- runWriter $ evacAlt lmatch
+--           error "TODO~"
+--         -- evacAlts [] = pure ([], [])
+--         -- evacAlts (L l match@Match{m_pats, m_ctxt, m_grhss} : lmatches) = do
+--         --   (fromDList -> firstAltBinds, pats') <- runWriter $ evac m_pats
+--         --   localBinds' <- evacWithNewDo grhssLocalBinds
+--         --   (binds, lmatches') <- evacAlts lmatches
+--         --   evacLGRHSs grhssGRHSs >>= \cases
+--         --     (Right grhss') -> do
+--         --       let lmatch' = L l match{m_pats = pats', m_grhss = m_grhss{grhssGRHSs = grhss', grhssLocalBinds = localBinds'}}
+--         --       case nonEmpty binds of -- TODO even though we need a regular list this is actually still safer if we use nonEmpty and toList
+--         --         Nothing -> pure (firstAltBinds, lmatch' : lmatches')
+--         --         Just neBinds -> do
+--         --           -- Example of what's happenning here:
+--         --           --   case s of
+--         --           --     a -> ...
+--         --           --     (!b -> X) -> ...
+--         --           --     c -> ...
+--         --           -- becomes
+--         --           --   case s of
+--         --           --     a -> ...
+--         --           --     <scrutinee> -> do
+--         --           --       <!b> <- b
+--         --           --       case <scrutinee> of
+--         --           --         (<!b> -> X) -> ...
+--         --           --         c -> ...
+--         --           scrutVar <- newScrutVar
+--         --           let newMG = MG noExtField (noLocA lmatches') Generated
+--         --               newCase = HsCase EpAnnNotUsed (noLocA $ HsVar noExtField $ noLocA scrutVar) newMG
+--         --               newStmt = BodyStmt noExtField (noLocA newCase) noExtField noExtField
+--         --               newExpr = HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA $ (fromBindStmt <$> toList neBinds) ++ [noLocA newStmt])
+--         --               newGRHS = GRHS EpAnnNotUsed [] (noLocA newExpr)
+--         --               newGRHSs = GRHSs emptyComments [noLocA newGRHS] emptyLocalBinds
+--         --               newMatch = noLocA $ Match EpAnnNotUsed m_ctxt [noLocA . VarPat noExtField $ noLocA scrutVar] newGRHSs
+--         --           pure (firstAltBinds, [lmatch', newMatch])
+--         --     (Left _) -> error "TODO Left"
+
+--         evacAlt :: forall sig m . Has (State Errors) sig m => LMatch GhcPs LExpr -> m ([BindStmt], [LMatch GhcPs LExpr])
+--         evacAlt (L l Match{m_pats, m_ctxt, m_grhss}) = do
+--           error "TODO alt"
+--           -- (nonEmpty . fromDList -> binds, remainingPats) <- runWriter $ evacPat pat
+
+--         evacPat :: forall sig m . Has Fill sig m => LPat GhcPs -> m (Either (LPat GhcPs, [([BindStmt], LPat GhcPs, RdrName)]) (LPat GhcPs))
+--         evacPat lpat@(L l pat) = case pat of
+--           (WildPat _) -> pure $ Right lpat
+--           (VarPat _ _) -> pure $ Right lpat
+--           (LazyPat xp p) -> L l . LazyPat xp <$$$> evacPat p
+--           (AsPat xp i p) -> L l . AsPat xp i <$$$> evacPat p
+--           (ParPat xp lt p rt) -> L l . (ParPat xp lt ?? rt) <$$$> evacPat p
+--           (BangPat xp p) -> L l . BangPat xp <$$$> evacPat p
+--           (ListPat xp ps) -> do
+--             (ps', withBangs) <- traverseUntilLeft evacPat ps
+--             case withBangs of
+--               Nothing -> pure $ Right lpat
+--               -- Oh boy I don't even know. I don't think checking rest is what we have to do here, we have to check whether there's any patterns that were produced by the first pat that contain bangs, or if rest contains bangs
+--               -- feel like there's a better approach here but ugh I don't know what it is
+--               Just (firstBang, rest) -> case nonEmpty rest of
+--           where
+--             infixl 4 <$$$>
+--             (<$$$>) = (fmap . first . first)
+--           --   (Left _) -> error "TODO Left"
+
+--         -- If there is at least one guard that requires bind statements, it it
+--         -- returns those, and the modified GRHSs up to that point, and the
+--         -- guards up to that point, and the unmodified GRHS without that guard,
+--         -- and the remaining unmodified GRHSs
+--         -- Otherwise returns the modified GRHSs
+--         evacLGRHSs :: forall sig m . Has (State Errors) sig m => [LGRHS GhcPs LExpr] ->
+--           m (Either ([BindStmt], [LGRHS GhcPs LExpr], [GuardLStmt GhcPs], LGRHS GhcPs LExpr, [LGRHS GhcPs LExpr]) [LGRHS GhcPs LExpr])
+--         evacLGRHSs grhss = do
+--           (grhss', rest) <- untilLeft evacLGRHS grhss
+--           case rest of
+--             Nothing -> pure $ Right grhss'
+--             Just ((stmts, guards, grhs), grhssRest) -> pure $ Left (stmts, grhss', guards, grhs, grhssRest)
+
+--         -- If there is at least one guard that requires bind statements, it
+--         -- returns those, and the guards up to that point, and the unmodified
+--         -- GRHS without those guards
+--         -- Otherwise returns the modified GRHS
+--         evacLGRHS :: forall sig m . Has (State Errors) sig m => LGRHS GhcPs LExpr ->
+--           m (Either ([BindStmt], [GuardLStmt GhcPs], LGRHS GhcPs LExpr) (LGRHS GhcPs LExpr))
+--         evacLGRHS lgrhs@(L l (GRHS xg guards body)) = case guards of
+--           [] -> pure $ Right lgrhs -- TODO replace holes and make sum type and what not
+--           g:gs -> do
+--             (fromDList -> stmts, g') <- runWriter $ evac g
+--             case nonEmpty stmts of
+--               Nothing -> addGuard g' <$> evacLGRHS (L l $ GRHS xg gs body)
+--               Just neStmts -> pure $ Left (toList neStmts, [g'], L l $ GRHS xg gs body)
+--           where
+--             addGuard g = \cases
+--               (Left (stmts, gs, rhs)) -> Left (stmts, g:gs, rhs)
+--               (Right (L l' (GRHS @GhcPs xg' gs body'))) -> Right (L l' $ GRHS xg' (g:gs) body')
+
+--         untilLeft :: forall m a b e . Monad m => (a -> m (Either e b)) -> [a] -> m ([b], Maybe (e, [a]))
+--         untilLeft f = (first reverse <$>) . go []
+--           where
+--             go acc [] = pure (acc, Nothing)
+--             go acc (x:xs) = f x >>= \cases
+--               (Left e) -> pure (acc, Just (e, xs))
 
     -- This lets us start new do-blocks in where blocks
     tryGRHSs :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryGRHSs e = do
       Refl <- hoistMaybe (eqT @a @(GRHSs GhcPs LExpr))
-      case e of
-        GRHSs exts grhss localBinds ->
-          GRHSs <$> goDo exts <*> goDo grhss <*> goNoDo localBinds
+      GRHSs exts grhss localBinds <- pure e
+      GRHSs exts <$> evac grhss <*> evacWithNewDo localBinds
 
     -- Find all !s in the given statements and combine the resulting bind
     -- statements into listss, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: Has (State Errors) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: forall sig m . Has (State Errors) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
-      (appEndo ?? [] -> stmts, lstmt') <- runWriter (goDo lstmt)
-      pure $ (noLocA . fromBindStmt <$> stmts) ++ [lstmt']
+      (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
+      pure $ (fromBindStmt <$> stmts) ++ [lstmt']
 
-type Fill = Writer (Endo [BindStmt]) :+: State Errors
+type DList a = Endo [a]
+
+fromDList :: DList a -> [a]
+fromDList = appEndo ?? []
+
+tellOne :: Has (Writer (DList w)) sig m => w -> m ()
+tellOne x = tell $ Endo (x:)
+
+type Fill = Writer (DList BindStmt) :+: State Errors
 
 type Errors = Map Loc LExpr
 
 data BindStmt = RdrName :<- LExpr
+              -- let var param1 ... paramn = val
+              | Let { var :: RdrName
+                    , params :: [RdrName]
+                    , val :: LExpr
+                    }
 
-fromBindStmt :: BindStmt -> ExprStmt GhcPs
-fromBindStmt (var :<- lexpr) = BindStmt EpAnnNotUsed varPat lexpr
-  where
-    varPat = noLocA . VarPat noExtField $ noLocA var
+fromBindStmt :: BindStmt -> ExprLStmt GhcPs
+fromBindStmt = noLocA . \cases
+  (var :<- lexpr) -> BindStmt EpAnnNotUsed varPat lexpr
+    where
+      varPat = noLocA . VarPat noExtField $ noLocA var
+  Let{var, params, val} -> LetStmt EpAnnNotUsed $ binding
+    where
+      lvar = noLocA var
+      binding = HsValBinds EpAnnNotUsed valBinds
+      valBinds = ValBinds NoAnnSortKey (unitBag . noLocA $ FunBind noExtField lvar mg []) []
+      mg = MG noExtField (noLocA [noLocA match]) Generated
+      pats = noLocA . VarPat noExtField . noLocA <$> params
+      match = Match EpAnnNotUsed (FunRhs lvar GHC.Prefix NoSrcStrict) pats . GRHSs emptyComments [rhs] $
+        EmptyLocalBinds noExtField
+      rhs = noLocA $ GRHS EpAnnNotUsed [] val
 
 -- | Look up an error and remove it from the remaining errors if found
 popError :: Has Fill sig m => Loc -> MaybeT m LExpr
@@ -173,17 +335,35 @@ popError loc = do
   put remainingErrs
   hoistMaybe merr
 
-mkVarName :: Loc -> RdrName
+-- Use the !'d expression if it's short enough, or else just <!expr>
+bangVar :: LExpr -> Loc -> RdrName
+bangVar (L _ expr) = case lines (showPprUnsafe expr) of
+  [str] | length str < 20 -> locVar $ "!" ++ str
+  _ -> locVar "<!expr>"
+
+locVar :: String -> Loc -> RdrName
 -- using spaces and special characters should make it impossible to overlap
 -- with user-defined names (but could still technically overlap with names
 -- introduced by other plugins)
-mkVarName loc = mkVarUnqual . fsLit $ printf "<! from line %d, column %d>" loc.line loc.col
+locVar str loc = mkVarUnqual . fsLit $
+  printf "<%s:%d:%d>" str loc.line loc.col
+
+-- TODO use Fresh to avoid shadowing
+newScrutVar :: Monad m => m RdrName
+newScrutVar = pure . mkVarUnqual . fsLit $ "<scrutinee>"
 
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
 
-tellOne :: Has (Writer (Endo [w])) sig m => w -> m ()
-tellOne x = tell $ Endo (x:)
+-- traverseUntilLeft :: Monad f => (a -> f (Either b c)) -> [a] -> f ([c], Maybe (b, [a]))
+-- traverseUntilLeft f = fix \go -> \cases
+--   [] -> pure ([], Nothing)
+--   (x:xs) -> f x >>= \cases
+--     (Left b) -> pure ([], Just (b, xs))
+--     (Right c) -> first (c:) <$> go xs
+
+-- traverseToFst :: Functor f => (a -> f b) -> a -> f (b, a)
+-- traverseToFst f x = (, x) <$> f x
 
 (??) :: Functor f => f (a -> b) -> a -> f b
 fs ?? x = ($ x) <$> fs

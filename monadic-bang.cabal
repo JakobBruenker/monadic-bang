@@ -64,6 +64,7 @@ library
                       GADTs,
                       RecordWildCards,
                       OverloadedRecordDot,
+                      NoFieldSelectors,
                       ViewPatterns,
                       StrictData,
                       PatternSynonyms

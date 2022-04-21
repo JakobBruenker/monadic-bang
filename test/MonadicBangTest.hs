@@ -22,7 +22,6 @@ main = do
   insideMDo
   insideRec
   nested
-  insideCase
   lambda
   insideLet
   listComp
@@ -31,6 +30,7 @@ main = do
   guards
   viewPat
   insideWhere
+  -- insideCase
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -65,11 +65,6 @@ insideRec = assertEq (Just $ take @Int 10 $ cycle [1, -1]) $ take 10 <$> do
 nested :: Test
 nested = assertEq "Ab"
                   !(pure (!(fmap toUpper <$> !(pure getA)) ++ !(!(pure getB))))
-
-insideCase :: Test
-insideCase = assertEq "b" case !getA of
-  something | something == !getA -> !getB
-  _ -> ""
 
 lambda :: Test
 lambda = assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure (!c ++ "!")) getC)
@@ -108,6 +103,18 @@ insideWhere = do
   where
     list = [![1,2,3] + 1 :: Int]
 
+-- insideCase :: Test
+-- insideCase = assertEq "b" case !getA of
+--   a -> "b"
+--   (!(pure (++ "_")) -> "d") -> "c"
+--   c -> "d"
+
+  -- something | 1 == 0 -> !getA ++ !getA
+  -- something@"a" | something == "b" -> !getC
+  --               | something == !getA -> !getB
+  -- "b" | !getB == !getB -> !getC
+  -- _ -> ""
+
 -- DONE:
 -- guards
 -- do
@@ -134,8 +141,10 @@ insideWhere = do
 -- case where (treat the same as top level? That's how idris does it) (also handled by GRHSs)
 
 -- TODO:
--- empty \o/
--- (however there are still things to do, see below)
+-- Think about recursive let - what do we do if we encounter `let a = !a`?
+--   probably the same thing we do when we see `case x of a -> !a`
+-- Should top-level/where guards of pattern bindings be treated like guards of lets? Is is possible?
+--   Including the patterns of functions, e.g. when there's a binary function with a ! in the second pattern is it possible to only execute it if the first pattern matches?
 
 -- Hmm in idris case alternatives seem to start a new do block. We're not currently doing it, but it's certainly worth considering.
 -- As usual I think not automatically starting a new do block offers the user more freedom, but it *might* be more intuitive to do it anyway, since that means only the effects in alternatives that actually happen are
@@ -175,6 +184,44 @@ insideWhere = do
 -- - if/case/multiway-if/let without arguments/guards don't start a do-block
 -- I think I can live with that.
 
+-- current plan: we can't use unboxed tuples or sums because we can't enable the extension.
+-- So, we use boxed tuples, and Either.
+-- But we can use a church encoding for Either instead!
+-- type Either a b = forall r . (a -> r) -> (b -> r) -> r
+-- left a  = \l _ -> l a
+-- right b = \_ r -> r b
+-- In fact, this means we could construct sum types of arbitrary arity easily, which could be useful.
+-- We might also need the empty sum type
+-- type Void = forall r . r
+-- but that's just a straightforward generalization of the above
+-- Now, for consistency, I feel like we should also use church encoded tuples, i.e.
+-- type (a1,a2,...,an) = forall r . (a1 -> ab -> ... -> an -> r) -> r
+-- (x1,x2,...,xn) = \f -> f x1 x2 ... xn
+
+-- So, to convert
+--
+--   case scrut of
+--     p1 -> e1
+--     p2 | g1 -> e2
+--        | g2 -> e3
+--     ...
+--     pn -> em
+--
+-- into
+--
+--   binds <- case scrut of
+--     p1 -> sum1 binds_of_e1
+--     p2 | g1 -> sum2 binds_of_e2
+--        | g2 -> sum3 binds_of_e3
+--     ...
+--     pn -> sumn binds_of_en
+--   binds e1lam e2lam e3lam ... enlam
+--
+-- We need to perform the following steps:
+-- - gather the !'d expressions in each branch
+-- - construct a case expression with them, each branch's binds combined into a tuple and the branches combined into a sum
+-- - call the church encoded binds tuple with one lambda expression per branch, where each !'d expression has been replaced by a lambda parameter
+
 -- one case which I think we won't handle like idris is that for us, a bare !x expression at top level will be treated as do {x' <- x; pure x}
 -- which is equivalent to x. It's a type error in idris. Alternatively we could make it a parse error... since it's not like there's any point in doing it.
 -- Or - perhaps best - we could add a parse warning
@@ -202,3 +249,30 @@ insideWhere = do
 
 -- We don't have any special handling for transform statements for now
 -- Parallel list/monad comps are handled such that first all the parallel statements are done, and then this is treated as a regular in series statement with the last statement, including any s in the last statement.
+
+-- NEW PLAN:
+-- Didived this whole thing into two phases (that also means two traversals, slower, but worth it):
+-- parsedResultAction: replace all holes by !<expr>
+--   where ! is a new function defined in that module
+--     (!) :: forall m a . m a -> a
+--     (!) = (!)
+--   Due to collisions we probably can't actually name it that... (maybe add a space?) though we might be able to get away with providing an exact name?
+-- typecheckedResultAction: Do the actual insertion of bind statements into the `binds` field, which houses the AST.
+-- remember to turn on -dcore-lint for the test, since our changes now bypass the typechecker.
+
+-- This has the major advantage of showing the user their own code in error messages, which also means we don't need to be as concerned about keeping code as close to what the user entered as possible.
+
+-- BUT, major problem: How do we prevent something like
+--   config :: String
+--   config = id !getLine
+-- from typechecking?
+
+-- usually that would be converted to
+--   config :: String
+--   config = do
+--     <!getLine> <- getLine
+--     id <!getLine>
+-- which fails because IO does not match [].
+
+-- However, we might be able to do our own typechecking, in typecheckedResultAction.
+-- This shouldn't even be hard. We know where we have to insert a do (or which existing do to use), we just have to make sure that any expression we use in a bind statement uses the same functor
