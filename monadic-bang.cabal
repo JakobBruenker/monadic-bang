@@ -61,6 +61,7 @@ library
     other-extensions: ScopedTypeVariables,
                       BlockArguments,
                       LambdaCase,
+                      DataKinds,
                       GADTs,
                       RecordWildCards,
                       OverloadedRecordDot,
@@ -104,4 +105,4 @@ test-suite monadic-bang-test
     build-depends:    base ^>=4.16.0.0,
                       monadic-bang,
 
-    ghc-options:      -fplugin=MonadicBang -Wall
+    ghc-options:      -fplugin=MonadicBang -Wall -dcore-lint

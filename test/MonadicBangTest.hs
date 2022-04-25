@@ -5,7 +5,7 @@
 {-# LANGUAGE ParallelListComp #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Main (main) where
+module Main where
 
 import GHC.Stack
 import Data.Char
@@ -14,6 +14,10 @@ getA, getB, getC :: IO String
 getA = pure "a"
 getB = pure "b"
 getC = pure "c"
+
+-- Binding to make sure we don't get any name collisions
+(!) :: Int
+(!) = 4
 
 main :: IO ()
 main = do
@@ -54,26 +58,26 @@ insideDo = do
 insideMDo :: Test
 insideMDo = assertEq (Just $ replicate @Int 10 -1) $ take 10 <$> mdo
   xs <- Just (1:xs)
-  pure (negate <$> !(pure xs))
+  pure (negate <$> !(pure @[] xs))
 
 insideRec :: Test
 insideRec = assertEq (Just $ take @Int 10 $ cycle [1, -1]) $ take 10 <$> do
   rec xs <- Just (1:ys)
-      ys <- pure (negate <$> !(pure xs))
+      ys <- pure (negate <$> !(pure @[] xs))
   pure xs
 
 nested :: Test
 nested = assertEq "Ab"
-                  !(pure (!(fmap toUpper <$> !(pure getA)) ++ !(!(pure getB))))
+                  !(pure @IO (!(fmap toUpper <$> !(pure @IO getA)) ++ !(!(pure @IO getB))))
 
 lambda :: Test
-lambda = assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure (!c ++ "!")) getC)
+lambda = assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure @IO (!c ++ "!")) getC)
 
 insideLet :: Test
 insideLet = assertEq "abc" !do
   let a = !getA
   let b _ = !getB
-  let c = !getC in pure (a ++ b b ++ c)
+  let c = !getC in pure @IO (a ++ b b ++ c)
 
 listComp :: Test
 listComp = assertEq @[Int]
@@ -93,8 +97,9 @@ guards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
            | otherwise = error "guards didn't match"
 
 viewPat :: Test
-viewPat = assertEq 9999 x
-  where (pure (!succ * !pred) -> x) = 100 :: Int
+-- TODO This is still defaulting, we'll have to see what happens here once the typechecking plugin is done
+viewPat = assertEq (9999 :: Int) x
+  where (pure (!succ * !pred) -> x) = 100
 
 insideWhere :: Test
 insideWhere = do
@@ -185,6 +190,7 @@ insideWhere = do
 -- I think I can live with that.
 
 -- current plan: we can't use unboxed tuples or sums because we can't enable the extension.
+-- ACTUALLY this is not true if we do it after typechecking, I think
 -- So, we use boxed tuples, and Either.
 -- But we can use a church encoding for Either instead!
 -- type Either a b = forall r . (a -> r) -> (b -> r) -> r
@@ -256,7 +262,7 @@ insideWhere = do
 --   where ! is a new function defined in that module
 --     (!) :: forall m a . m a -> a
 --     (!) = (!)
---   Due to collisions we probably can't actually name it that... (maybe add a space?) though we might be able to get away with providing an exact name?
+--   Due to collisions we probably can't actually name it that... but we can prefix it with a non-breaking space. Should just print ?! when unicode isn't supported.
 -- typecheckedResultAction: Do the actual insertion of bind statements into the `binds` field, which houses the AST.
 -- remember to turn on -dcore-lint for the test, since our changes now bypass the typechecker.
 
@@ -276,3 +282,54 @@ insideWhere = do
 
 -- However, we might be able to do our own typechecking, in typecheckedResultAction.
 -- This shouldn't even be hard. We know where we have to insert a do (or which existing do to use), we just have to make sure that any expression we use in a bind statement uses the same functor
+
+-- I'm not sure if we can use GHC's ApplicativeDo handling with this approach.
+
+-- However, for the last two paragraphs: We could actually just manually call rnExpr and tcExpr on our generated Do expressions, solving both problems elegantly. The already typechecked expression we're wrapping should
+-- be replaced by a hole, and then we can see if the type of the hole is unifiable with the type of the wrapped expression.
+
+-- TODO: test whether linear types work. If not, so be it, though it's probably possible to make them work.
+
+-- Here's an interesting point: We're treating functions/lambdas differently than everything else, but what about
+-- things that don't look like functions but take a constraint dict?
+
+-- I would prefer if we could treat them the same way as non-functions, but I don't think it's possible. Consider:
+--   printAndReturn :: Show a => a -> IO a
+--   printAndReturn x = print x >> return x
+--
+--   -- -XNoMonoLocalBinds, and this is a local binding
+--   let x = !(printAndReturn 4)
+
+-- Can printAndReturn be run outside of this let binding, resulting in x :: Num a => a?
+-- No, since we need to know how we print it before that, e.g. should it be "4" or "4.0"?
+
+-- On the whole though this is not too bad, since haskell programmers are by and large familiar with this sort of thing being treated differently.
+-- Also I think something that we can only do if we treat parsing and typechecking separately, which just keeps having more advantages.
+
+
+
+-- Pros and cons for using parser plugin vs typechecker plugin:
+
+-- Parser Con
+-------------
+-- if there's no constraint in the type sig, we don't know whether a let binding is polymorphic
+--   user workaround: add type sig
+-- Error messages look (potentially much) worse, which also makes us worry more about keeping things as close to source as possible
+
+-- Typecheck Con
+----------------
+-- ApplicativeDo gets much more complicated
+-- You need additional type sigs sometimes because the monad constraint is ambiguous or you only have an Applicative constraint
+-- Linear types get much harder to support
+-- we have to do the whole renaming and typechecking step
+-- we have to do two traversals
+-- we have to rely on -dcore-lint to catch any errors
+
+-- What would happen if we do parser and just don't worry about polymorphic let? To take the previouss example:
+--   let x = !(printAndReturn 4) in print (x :: Int) >> print (x :: Double)
+-- would become
+--   do <!(printAndReturn 4)> <- printAndReturn 4
+--      let x = <!(printAndReturn 4)> in print (x :: Int) >> print (x :: Double)
+
+-- GHCi complains about not being able to match Double with Int, so I suppose this would effectively just monomorphize the binding?
+-- Maybe we actually *can* just ignore this :thinking_face:
