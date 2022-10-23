@@ -18,6 +18,7 @@ import Control.Monad.Trans.Maybe
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Effect.Sum hiding (L)
+import Control.Exception
 import Data.Data
 import Data.Maybe
 import Data.Foldable
@@ -56,8 +57,6 @@ data Loc = MkLoc {line :: Int, col :: Int}
 type Expr = HsExpr GhcPs
 type LExpr = LHsExpr GhcPs
 
-type PsErrors = Messages PsError
-
 -- | Decrement column by one to get the location of a bang
 bangLoc :: Loc -> Loc
 bangLoc loc = loc{col = loc.col - 1}
@@ -69,14 +68,14 @@ pattern ExprLoc loc expr <- L (locA -> RealSrcSpan (spanToLoc -> loc) _) expr
 spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
-parseOptions :: Located HsModule -> [CommandLineOption] -> Verbosity
+parseOptions :: Located HsModule -> [CommandLineOption] -> Either ErrorCall Verbosity
 parseOptions mod' options = case options of
-  ["verbose"] -> Verbose
-  ["v"] -> Verbose
-  ["quiet"] -> Quiet
-  ["q"] -> Quiet
-  [] -> Quiet
-  _ -> error $
+  ["verbose"] -> pure Verbose
+  ["v"] -> pure Verbose
+  ["quiet"] -> pure Quiet
+  ["q"] -> pure Quiet
+  [] -> pure Quiet
+  _ -> Left . ErrorCall $
     "Incorrect command line options for plugin MonadicBang, encountered in " ++ modName ++ modFile ++
     "\n\tOptions that were supplied are " ++ show options ++
     "\n\n\tUsage: Supply a single argument chosen from v[erbose] | q[uiet]" ++
@@ -90,13 +89,12 @@ parseOptions mod' options = case options of
       (RealSrcSpan rss _) -> Just rss
       (UnhelpfulSpan _) -> Nothing
 
-
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
 replaceBangs options _ (ParsedResult (HsParsedModule mod' files) msgs) = do
-  let verbosity = parseOptions mod' options
-  traceShow options (pure ())
+  verbosity <- liftIO . either throwIO pure $ parseOptions mod' options
+  traceShow options $ pure ()
   -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
-  let (newErrors, mod'') = run . runWriter @PsErrors $ fillHoles fills mod'
+  let (newErrors, mod'') = run . runWriter $ fillHoles fills mod'
   log verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
@@ -115,7 +113,7 @@ replaceBangs options _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: (Data a, Has (Writer PsErrors) sig m) => Bang'dExprs -> a -> m a
+fillHoles :: (Data a, Has (PsErrors) sig m) => Bang'dExprs -> a -> m a
 fillHoles fillers ast = do
   (remainingErrs, ast') <- runState fillers $ evacWithNewDo ast
   pure case nonEmpty (toList remainingErrs) of
@@ -124,13 +122,13 @@ fillHoles fillers ast = do
     --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
     Just _neErrs -> trace "XXX JB WARNING" ast'
   where
-    evacWithNewDo :: forall a sig m . (Has (Writer PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> m a
+    evacWithNewDo :: forall a sig m . (Has (PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> m a
     evacWithNewDo e = maybe (gmapM evacWithNewDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     -- We use MaybeT since it has the MonadFail instance we want, as opposed to
     -- the other handlers for 'Empty'
-    tryInsertDo :: forall a sig m . (Has (Writer PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> MaybeT m a
+    tryInsertDo :: forall a sig m . (Has (PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       (fromDList -> stmts, expr') <- runWriter (evac expr)
@@ -193,7 +191,7 @@ fillHoles fillers ast = do
         -- TODO: Technically, you could also split up nested patterns, such that in (Just (!foo -> X)), !foo is only executed in the Just case
         --       seems doable
         -- TODO: we might get unused warnings with the scrutinee if we're not careful. I guess we'll have to traverse the tree to see if the scrutinee is being used...?
-        -- -- TODO: we might get unused warnings with the scrutinee if we're not careful. I guess we'll have to traverse the tree to see if the scrutinee is being used...?
+        -- TODO: Wait, can we just prefix it with _ to prevent such warnings?
         -- HsCase xc scrut mg -> do
         --   scrut' <- evac scrut
         --   (lambdas, mg') <- evacMatchGroup mg
@@ -326,7 +324,7 @@ fillHoles fillers ast = do
     -- Find all !s in the given statements and combine the resulting bind
     -- statements into listss, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: forall sig m . Has (Writer PsErrors :+: State Bang'dExprs) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: forall sig m . Has (PsErrors :+: State Bang'dExprs) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
       (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
       pure $ (fromBindStmt <$> stmts) ++ [lstmt']
@@ -339,7 +337,9 @@ fromDList = appEndo ?? []
 tellOne :: Has (Writer (DList w)) sig m => w -> m ()
 tellOne x = tell $ Endo (x:)
 
-type Fill = Writer PsErrors :+: Writer (DList BindStmt) :+: State Bang'dExprs
+type PsErrors = Writer (Messages PsError)
+
+type Fill = PsErrors :+: Writer (DList BindStmt) :+: State Bang'dExprs
 
 type Bang'dExprs = Map Loc LExpr
 
@@ -367,6 +367,7 @@ fromBindStmt = noLocA . \cases
       rhs = noLocA $ GRHS EpAnnNotUsed [] val
 
 -- | Look up an error and remove it from the remaining errors if found
+-- TODO instead of using State, we could use a custom effect that only supports this
 popError :: Has Fill sig m => Loc -> MaybeT m LExpr
 popError loc = do
   (merr, remainingErrs) <- M.updateLookupWithKey (\_ _ -> Nothing) loc <$> get
@@ -376,6 +377,7 @@ popError loc = do
 -- Use the !'d expression if it's short enough, or else just <!expr>
 -- We don't need to worry about shadowing, since we add the line and column numbers
 -- TODO Also should we instad use the first n characters followed by ... if it's too long? Seems better
+-- TODO or possibly we could just use Reader with local instead, though the callsites would look a little different then
 bangVar :: LExpr -> Loc -> RdrName
 bangVar (L _ expr) = case lines (showPprUnsafe expr) of
   [str] | length str < 20 -> locVar $ "!" ++ str
@@ -397,6 +399,9 @@ locVar str loc = mkVarUnqual . fsLit $
 
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
+
+-- tellPsError :: Has PsErrors sig m => PsError -> SrcSpan -> m ()
+-- tellPsError err srcSpan = tell . singleMessage $ MsgEnvelope srcSpan neverQualify err SevError
 
 -- traverseUntilLeft :: Monad f => (a -> f (Either b c)) -> [a] -> f ([c], Maybe (b, [a]))
 -- traverseUntilLeft f = fix \go -> \cases
