@@ -9,15 +9,19 @@
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE StrictData #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DerivingStrategies #-}
 
 module MonadicBang (plugin) where
 
 import Prelude hiding (log)
 import Control.Applicative
+import Control.Algebra (send, alg)
 import Control.Monad.Trans.Maybe
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Effect.Sum hiding (L)
+import Control.Effect.Sum qualified as Sum
 import Control.Exception
 import Data.Data
 import Data.Maybe
@@ -29,7 +33,7 @@ import Data.Monoid
 import GHC
 import GHC.Data.Bag
 import GHC.Parser.Errors.Types
-import GHC.Plugins hiding (Expr, Let, empty, (<>))
+import GHC.Plugins hiding (Expr, Let, empty, (<>), panic)
 import GHC.Types.Error
 import GHC.Utils.Monad (concatMapM)
 import Text.Printf
@@ -67,6 +71,27 @@ pattern ExprLoc loc expr <- L (locA -> RealSrcSpan (spanToLoc -> loc) _) expr
 
 spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
+
+-- Offers a number of things that can be yoinked, but only once
+data Offer k v m a where
+  Yoink :: k -> Offer k v m (Maybe v)
+
+yoink :: Has (Offer k v) sig m => k -> m (Maybe v)
+yoink = send . Yoink
+
+newtype OfferC k v m a = OfferC {getOfferState :: StateC (Map k v) m a}
+  deriving newtype (Functor, Applicative, Monad)
+
+-- Returns the result of the computation, along with the remaining offers
+runOffer :: Map k v -> OfferC k v m a -> m (Map k v, a)
+runOffer o (OfferC s) = runState o s
+
+instance (Algebra sig m, Ord k) => Algebra (Offer k v :+: sig) (OfferC k v m) where
+  alg hdl sig ctx = case sig of
+    Sum.L (Yoink k) -> OfferC $ StateC \o -> do
+      let (mv, remaining) = M.updateLookupWithKey (\_ _ -> Nothing) k o
+      pure (remaining, mv <$ ctx)
+    Sum.R other -> OfferC (alg ((.getOfferState) . hdl) (Sum.R other) ctx)
 
 parseOptions :: Located HsModule -> [CommandLineOption] -> Either ErrorCall Verbosity
 parseOptions mod' options = case options of
@@ -113,22 +138,22 @@ replaceBangs options _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: (Data a, Has (PsErrors) sig m) => Bang'dExprs -> a -> m a
+fillHoles :: (Data a, Has PsErrors sig m) => Map Loc LExpr -> a -> m a
 fillHoles fillers ast = do
-  (remainingErrs, ast') <- runState fillers $ evacWithNewDo ast
+  (remainingErrs, ast') <- runOffer fillers $ evacWithNewDo ast
   pure case nonEmpty (toList remainingErrs) of
     Nothing -> ast'
-    -- Just neErrs -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
+    -- Just neErrs -> panic "Found extraneous bangs" -- TODO improve error msg?
     --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
     Just _neErrs -> trace "XXX JB WARNING" ast'
   where
-    evacWithNewDo :: forall a sig m . (Has (PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> m a
+    evacWithNewDo :: forall a sig m . (Has (PsErrors :+: HoleFills) sig m, Data a) => a -> m a
     evacWithNewDo e = maybe (gmapM evacWithNewDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     -- We use MaybeT since it has the MonadFail instance we want, as opposed to
     -- the other handlers for 'Empty'
-    tryInsertDo :: forall a sig m . (Has (PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> MaybeT m a
+    tryInsertDo :: forall a sig m . (Has (PsErrors :+: HoleFills) sig m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       (fromDList -> stmts, expr') <- runWriter (evac expr)
@@ -173,7 +198,7 @@ fillHoles fillers ast = do
       case expr of
         -- Replace holes resulting from `!`
         HsUnboundVar _ _ -> do
-          lexpr' <- evac =<< popError loc
+          lexpr' <- evac =<< fromMaybe (panic "Couldn't find hole filler") <$> yoink loc -- maybe improve error message
           let name = bangVar lexpr' loc
           tellOne (name :<- lexpr')
           evac . L l $  HsVar noExtField (noLocA name)
@@ -324,7 +349,7 @@ fillHoles fillers ast = do
     -- Find all !s in the given statements and combine the resulting bind
     -- statements into listss, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: forall sig m . Has (PsErrors :+: State Bang'dExprs) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: forall sig m . Has (PsErrors :+: HoleFills) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
       (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
       pure $ (fromBindStmt <$> stmts) ++ [lstmt']
@@ -338,10 +363,9 @@ tellOne :: Has (Writer (DList w)) sig m => w -> m ()
 tellOne x = tell $ Endo (x:)
 
 type PsErrors = Writer (Messages PsError)
+type HoleFills = Offer Loc LExpr
 
-type Fill = PsErrors :+: Writer (DList BindStmt) :+: State Bang'dExprs
-
-type Bang'dExprs = Map Loc LExpr
+type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills
 
 data BindStmt = RdrName :<- LExpr
               -- let var param1 ... paramn = val
@@ -365,15 +389,6 @@ fromBindStmt = noLocA . \cases
       match = Match EpAnnNotUsed (FunRhs lvar GHC.Prefix NoSrcStrict) pats . GRHSs emptyComments [rhs] $
         EmptyLocalBinds noExtField
       rhs = noLocA $ GRHS EpAnnNotUsed [] val
-
--- | Look up an error and remove it from the remaining errors if found
--- TODO instead of using State, we could use a custom effect that only supports this
--- TODO or possibly we could just use Reader with local instead, though the callsites would look a little different then
-popError :: Has Fill sig m => Loc -> MaybeT m LExpr
-popError loc = do
-  (merr, remainingErrs) <- M.updateLookupWithKey (\_ _ -> Nothing) loc <$> get
-  put remainingErrs
-  hoistMaybe merr
 
 -- Use the !'d expression if it's short enough, or else just <!expr>
 -- We don't need to worry about shadowing, since we add the line and column numbers
@@ -415,3 +430,7 @@ hoistMaybe = MaybeT . pure
 
 (??) :: Functor f => f (a -> b) -> a -> f b
 fs ?? x = ($ x) <$> fs
+
+-- TODO add instruction to send bug report
+panic :: String -> a
+panic = error
