@@ -286,4 +286,4 @@ insideWhere = do
 -- Additionally, a lot of use-cases would be inside a do-block anyway,
 
 -- You could go with a rule like "Don't introduce a do-block anywhere except at the top-level of a function definition", buut maybe it makes sense to start simple.
--- That would be a backwards-compatible change, anyway.
+-- That would be a backwards-compatible change, anyway... mostly. Not entirely, since it means we also don't insert a new do for let-bindings that take arguments.
