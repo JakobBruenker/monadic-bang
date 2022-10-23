@@ -368,6 +368,7 @@ fromBindStmt = noLocA . \cases
 
 -- | Look up an error and remove it from the remaining errors if found
 -- TODO instead of using State, we could use a custom effect that only supports this
+-- TODO or possibly we could just use Reader with local instead, though the callsites would look a little different then
 popError :: Has Fill sig m => Loc -> MaybeT m LExpr
 popError loc = do
   (merr, remainingErrs) <- M.updateLookupWithKey (\_ _ -> Nothing) loc <$> get
@@ -377,7 +378,6 @@ popError loc = do
 -- Use the !'d expression if it's short enough, or else just <!expr>
 -- We don't need to worry about shadowing, since we add the line and column numbers
 -- TODO Also should we instad use the first n characters followed by ... if it's too long? Seems better
--- TODO or possibly we could just use Reader with local instead, though the callsites would look a little different then
 bangVar :: LExpr -> Loc -> RdrName
 bangVar (L _ expr) = case lines (showPprUnsafe expr) of
   [str] | length str < 20 -> locVar $ "!" ++ str
