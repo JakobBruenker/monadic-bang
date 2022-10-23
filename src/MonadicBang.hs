@@ -19,6 +19,7 @@ import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Effect.Sum hiding (L)
 import Data.Data
+import Data.Maybe
 import Data.Foldable
 import Data.List.NonEmpty (nonEmpty)
 import Data.Map.Strict (Map)
@@ -27,7 +28,7 @@ import Data.Monoid
 import GHC
 import GHC.Data.Bag
 import GHC.Parser.Errors.Types
-import GHC.Plugins hiding (Expr, Let, empty)
+import GHC.Plugins hiding (Expr, Let, empty, (<>))
 import GHC.Types.Error
 import GHC.Utils.Monad (concatMapM)
 import Text.Printf
@@ -41,9 +42,7 @@ import GHC.Utils.Logger
 
 plugin :: Plugin
 plugin = defaultPlugin
-  -- TODO: have a second module MonadicBangDebug, that does the same thing but also pretty prints the modified AST
-  -- TODO: Probably this second plugin should not be pure, so that you can see the output every time - or maybe not, because that would make it run twice every time...
-  { parsedResultAction = replaceBangs Verbose
+  { parsedResultAction = replaceBangs
   -- , pluginRecompile = purePlugin -- XXX JB the plugin is pure, just commenting it out so we can see the output every time we run the tests
   }
 
@@ -57,6 +56,8 @@ data Loc = MkLoc {line :: Int, col :: Int}
 type Expr = HsExpr GhcPs
 type LExpr = LHsExpr GhcPs
 
+type PsErrors = Messages PsError
+
 -- | Decrement column by one to get the location of a bang
 bangLoc :: Loc -> Loc
 bangLoc loc = loc{col = loc.col - 1}
@@ -68,21 +69,45 @@ pattern ExprLoc loc expr <- L (locA -> RealSrcSpan (spanToLoc -> loc) _) expr
 spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
-replaceBangs :: Verbosity -> [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
-replaceBangs verbosity _ _ (ParsedResult (HsParsedModule mod' files) msgs) = do
-  -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
-  let mod'' = fillHoles fills mod'
-  log (ppr mod'')
-  pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors}
+parseOptions :: Located HsModule -> [CommandLineOption] -> Verbosity
+parseOptions mod' options = case options of
+  ["verbose"] -> Verbose
+  ["v"] -> Verbose
+  ["quiet"] -> Quiet
+  ["q"] -> Quiet
+  [] -> Quiet
+  _ -> error $
+    "Incorrect command line options for plugin MonadicBang, encountered in " ++ modName ++ modFile ++
+    "\n\tOptions that were supplied are " ++ show options ++
+    "\n\n\tUsage: Supply a single argument chosen from v[erbose] | q[uiet]" ++
+    "\n\tThe default if no argument is supplied is \"quiet\""
+
   where
-    log m = case verbosity of
-      Quiet -> pure ()
-      Verbose -> do
+    modFile = fromMaybe "" $ ((" in file " ++) . unpackFS . srcSpanFile) <$> toRealSrcSpan (getLoc mod')
+    modName = fromMaybe "an unnamed module" $ (("module " ++) . moduleNameString . unLoc) <$> (unLoc mod').hsmodName
+
+    toRealSrcSpan = \cases
+      (RealSrcSpan rss _) -> Just rss
+      (UnhelpfulSpan _) -> Nothing
+
+
+replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
+replaceBangs options _ (ParsedResult (HsParsedModule mod' files) msgs) = do
+  let verbosity = parseOptions mod' options
+  traceShow options (pure ())
+  -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
+  let (newErrors, mod'') = run . runWriter @PsErrors $ fillHoles fills mod'
+  log verbosity (ppr mod'')
+  pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
+  where
+    log = \cases
+      Quiet _ -> pure ()
+      Verbose m -> do
         logger <- getLogger
         liftIO $ logMsg logger MCInfo (UnhelpfulSpan UnhelpfulNoLocationInfo) m
 
     -- Extract the errors we care about, throw the rest back in
-    (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
+    (mkMessages -> oldErrors, M.fromList . bagToList -> fills) =
       (partitionBagWith ?? msgs.psErrors.getMessages) \cases
         err | PsErrBangPatWithoutSpace lexpr@(ExprLoc (bangLoc -> loc) _) <- err.errMsgDiagnostic
             -> Right (loc, lexpr)
@@ -90,21 +115,22 @@ replaceBangs verbosity _ _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: Data a => BangedExprs -> a -> a
-fillHoles fillers ast = case run $ runState fillers (evacWithNewDo ast) of
-  (remainingErrs, ast') -> case nonEmpty (toList remainingErrs) of
+fillHoles :: (Data a, Has (Writer PsErrors) sig m) => Bang'dExprs -> a -> m a
+fillHoles fillers ast = do
+  (remainingErrs, ast') <- runState fillers $ evacWithNewDo ast
+  pure case nonEmpty (toList remainingErrs) of
     Nothing -> ast'
     -- Just neErrs -> error "Found extraneous bangs" -- TODO improve error msg (incl. bug report url)
     --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
     Just _neErrs -> trace "XXX JB WARNING" ast'
   where
-    evacWithNewDo :: forall a sig m . (Has (State BangedExprs) sig m, Data a) => a -> m a
+    evacWithNewDo :: forall a sig m . (Has (Writer PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> m a
     evacWithNewDo e = maybe (gmapM evacWithNewDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     -- We use MaybeT since it has the MonadFail instance we want, as opposed to
     -- the other handlers for 'Empty'
-    tryInsertDo :: forall a sig m . (Has (State BangedExprs) sig m, Data a) => a -> MaybeT m a
+    tryInsertDo :: forall a sig m . (Has (Writer PsErrors :+: State Bang'dExprs) sig m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       (fromDList -> stmts, expr') <- runWriter (evac expr)
@@ -300,7 +326,7 @@ fillHoles fillers ast = case run $ runState fillers (evacWithNewDo ast) of
     -- Find all !s in the given statements and combine the resulting bind
     -- statements into listss, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: forall sig m . Has (State BangedExprs) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: forall sig m . Has (Writer PsErrors :+: State Bang'dExprs) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
       (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
       pure $ (fromBindStmt <$> stmts) ++ [lstmt']
@@ -313,9 +339,9 @@ fromDList = appEndo ?? []
 tellOne :: Has (Writer (DList w)) sig m => w -> m ()
 tellOne x = tell $ Endo (x:)
 
-type Fill = Writer (DList BindStmt) :+: State BangedExprs
+type Fill = Writer PsErrors :+: Writer (DList BindStmt) :+: State Bang'dExprs
 
-type BangedExprs = Map Loc LExpr
+type Bang'dExprs = Map Loc LExpr
 
 data BindStmt = RdrName :<- LExpr
               -- let var param1 ... paramn = val
