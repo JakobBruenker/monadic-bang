@@ -70,7 +70,7 @@ library
                       PatternSynonyms
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.16.0.0,
+    build-depends:    base >=4.17.0.0 && < 5,
                       ghc >= 9.3,
                       containers ^>= 0.6.4.1,
                       transformers ^>= 0.5.6.2,
@@ -101,7 +101,7 @@ test-suite monadic-bang-test
     main-is:          MonadicBangTest.hs
 
     -- Test dependencies.
-    build-depends:    base ^>=4.16.0.0,
+    build-depends:    base >=4.16.0.0 && <5,
                       monadic-bang,
 
     ghc-options:      -fplugin=MonadicBang -Wall

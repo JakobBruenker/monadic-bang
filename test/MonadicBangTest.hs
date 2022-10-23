@@ -276,3 +276,14 @@ insideWhere = do
 
 -- However, we might be able to do our own typechecking, in typecheckedResultAction.
 -- This shouldn't even be hard. We know where we have to insert a do (or which existing do to use), we just have to make sure that any expression we use in a bind statement uses the same functor
+-- Update: Typecheck plugin has worse problems, see corresponding branch
+
+-- Santiweight made an interesting suggestion here:
+-- https://github.com/ghc-proposals/ghc-proposals/issues/527#issuecomment-1261911356
+-- Don't ever insert `do`s automatically, always rely on the user to do it.
+-- At first I didn't like this, because it makes some simple things slightly more verbose.
+-- But the more I think about it, especially with let and recursive bindings in both let and case, it makes the specification so much simpler
+-- Additionally, a lot of use-cases would be inside a do-block anyway,
+
+-- You could go with a rule like "Don't introduce a do-block anywhere except at the top-level of a function definition", buut maybe it makes sense to start simple.
+-- That would be a backwards-compatible change, anyway.

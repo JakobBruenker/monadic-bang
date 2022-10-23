@@ -12,15 +12,14 @@
 
 module MonadicBang (plugin) where
 
+import Prelude hiding (log)
 import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Effect.Sum hiding (L)
-import Data.Bifunctor
 import Data.Data
 import Data.Foldable
-import Data.Function
 import Data.List.NonEmpty (nonEmpty)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
@@ -34,15 +33,21 @@ import GHC.Utils.Monad (concatMapM)
 import Text.Printf
 
 import Debug.Trace
-import GHC.Hs.Dump
+-- import GHC.Hs.Dump -- XXX JB
+
+import GHC.Utils.Logger
 
 -- TODO: Write user manual as haddock comment
 
 plugin :: Plugin
 plugin = defaultPlugin
-  { parsedResultAction = replaceBangs
-  , pluginRecompile = purePlugin
+  -- TODO: have a second module MonadicBangDebug, that does the same thing but also pretty prints the modified AST
+  -- TODO: Probably this second plugin should not be pure, so that you can see the output every time - or maybe not, because that would make it run twice every time...
+  { parsedResultAction = replaceBangs Verbose
+  -- , pluginRecompile = purePlugin -- XXX JB the plugin is pure, just commenting it out so we can see the output every time we run the tests
   }
+
+data Verbosity = Verbose | Quiet
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
@@ -53,8 +58,8 @@ type Expr = HsExpr GhcPs
 type LExpr = LHsExpr GhcPs
 
 -- | Decrement column by one to get the location of a bang
-addBang :: Loc -> Loc
-addBang loc = loc{col = loc.col - 1}
+bangLoc :: Loc -> Loc
+bangLoc loc = loc{col = loc.col - 1}
 
 -- | Used to extract the Loc of a located expression
 pattern ExprLoc :: Loc -> Expr -> LExpr
@@ -63,22 +68,29 @@ pattern ExprLoc loc expr <- L (locA -> RealSrcSpan (spanToLoc -> loc) _) expr
 spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
-replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
-replaceBangs _ _ (ParsedResult (HsParsedModule mod' files) msgs) =
+replaceBangs :: Verbosity -> [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
+replaceBangs verbosity _ _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
-  -- TODO: have a second module MonadicBangDebug, that does the same thing but also pretty prints the modified AST
-  pure $ ParsedResult (HsParsedModule (let m' = fillHoles fills mod' in trace (showSDocUnsafe $ ppr m') m') files) msgs{psErrors}
+  let mod'' = fillHoles fills mod'
+  log (ppr mod'')
+  pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors}
   where
-    -- Take out the errors we care about, throw the rest back in
+    log m = case verbosity of
+      Quiet -> pure ()
+      Verbose -> do
+        logger <- getLogger
+        liftIO $ logMsg logger MCInfo (UnhelpfulSpan UnhelpfulNoLocationInfo) m
+
+    -- Extract the errors we care about, throw the rest back in
     (mkMessages -> psErrors, M.fromList . bagToList -> fills) =
       (partitionBagWith ?? msgs.psErrors.getMessages) \cases
-        err | PsErrBangPatWithoutSpace lexpr@(ExprLoc (addBang -> loc) _) <- err.errMsgDiagnostic
+        err | PsErrBangPatWithoutSpace lexpr@(ExprLoc (bangLoc -> loc) _) <- err.errMsgDiagnostic
             -> Right (loc, lexpr)
             | otherwise -> Left err
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: Data a => Errors -> a -> a
+fillHoles :: Data a => BangedExprs -> a -> a
 fillHoles fillers ast = case run $ runState fillers (evacWithNewDo ast) of
   (remainingErrs, ast') -> case nonEmpty (toList remainingErrs) of
     Nothing -> ast'
@@ -86,13 +98,13 @@ fillHoles fillers ast = case run $ runState fillers (evacWithNewDo ast) of
     --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
     Just _neErrs -> trace "XXX JB WARNING" ast'
   where
-    evacWithNewDo :: forall a sig m . (Has (State Errors) sig m, Data a) => a -> m a
+    evacWithNewDo :: forall a sig m . (Has (State BangedExprs) sig m, Data a) => a -> m a
     evacWithNewDo e = maybe (gmapM evacWithNewDo $ e) pure =<< runMaybeT (tryInsertDo e)
 
     -- surround the expression with a `do` if necessary
     -- We use MaybeT since it has the MonadFail instance we want, as opposed to
     -- the other handlers for 'Empty'
-    tryInsertDo :: forall a sig m . (Has (State Errors) sig m, Data a) => a -> MaybeT m a
+    tryInsertDo :: forall a sig m . (Has (State BangedExprs) sig m, Data a) => a -> MaybeT m a
     tryInsertDo expr = do
       Refl <- hoistMaybe (eqT @a @LExpr)
       (fromDList -> stmts, expr') <- runWriter (evac expr)
@@ -288,7 +300,7 @@ fillHoles fillers ast = case run $ runState fillers (evacWithNewDo ast) of
     -- Find all !s in the given statements and combine the resulting bind
     -- statements into listss, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: forall sig m . Has (State Errors) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: forall sig m . Has (State BangedExprs) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
       (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
       pure $ (fromBindStmt <$> stmts) ++ [lstmt']
@@ -301,9 +313,9 @@ fromDList = appEndo ?? []
 tellOne :: Has (Writer (DList w)) sig m => w -> m ()
 tellOne x = tell $ Endo (x:)
 
-type Fill = Writer (DList BindStmt) :+: State Errors
+type Fill = Writer (DList BindStmt) :+: State BangedExprs
 
-type Errors = Map Loc LExpr
+type BangedExprs = Map Loc LExpr
 
 data BindStmt = RdrName :<- LExpr
               -- let var param1 ... paramn = val
@@ -336,6 +348,8 @@ popError loc = do
   hoistMaybe merr
 
 -- Use the !'d expression if it's short enough, or else just <!expr>
+-- We don't need to worry about shadowing, since we add the line and column numbers
+-- TODO Also should we instad use the first n characters followed by ... if it's too long? Seems better
 bangVar :: LExpr -> Loc -> RdrName
 bangVar (L _ expr) = case lines (showPprUnsafe expr) of
   [str] | length str < 20 -> locVar $ "!" ++ str
@@ -345,12 +359,15 @@ locVar :: String -> Loc -> RdrName
 -- using spaces and special characters should make it impossible to overlap
 -- with user-defined names (but could still technically overlap with names
 -- introduced by other plugins)
+-- TODO is there a way to make a RdrName that's guaranteed to be unique, but has this as OccName? Maybe nameRdrName with mkInternalName
+-- TODO however you need a unique for that, and all the ways I can see to make uniques are determinstic, so not sure they would actually be "unique"
 locVar str loc = mkVarUnqual . fsLit $
   printf "<%s:%d:%d>" str loc.line loc.col
 
 -- TODO use Fresh to avoid shadowing
-newScrutVar :: Monad m => m RdrName
-newScrutVar = pure . mkVarUnqual . fsLit $ "<scrutinee>"
+-- XXX JB unneeded?
+-- newScrutVar :: Monad m => m RdrName
+-- newScrutVar = pure . mkVarUnqual . fsLit $ "<scrutinee>"
 
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
