@@ -314,7 +314,13 @@ insideWhere = do
 -- XXX JB anyway, add a test for the above case, i.e. where you try to use variables that are not in scope
 -- (it's not obvious how to do that, since we currently don't have any tests that expect compiler errors)
 
--- Quick note on if/case as well:
+-- Thinking about case a bit more, a reasonable compromise might be:
+-- - We have the special behavior for any expression in the rhs of case
+-- - We don't have special behavior for the lhs of case
+-- That would simplify things a lot, actually, while still offering, like, 90% of the advantages.
+-- The same applies to MultiWayIf.
+
+-- Another quick note on if/case:
 -- Usually, the fancy thing where you evac it to the do and only do actions that are needed should be fine.
 -- But what if the scrutinee uses variables that are out of scope there?
 -- I suppose it's not any different from e.g. let. The question to consider though is if there are situations where the idris-like behavior would be more intuitive.
@@ -324,9 +330,9 @@ insideWhere = do
 do putStrLn "hi"
    let doSomething arg1 arg2 =
          if arg1 == arg2
-           then !(fetchUser)
-           else !(fetchGuest)
-    doSomething user1 user2
+           then !fetchUser
+           else !fetchGuest ++ " (Guest)"
+   let x = doSomething user1 user2
 -}
 
 -- I think the fancy behavior could still be fine here.
@@ -337,9 +343,46 @@ do putStrLn "hi"
 do putStrLn "hi"
    let doSomething arg1 arg2 = do
          if arg1 == arg2
-           then !(fetchUser)
-           else !(fetchGuest)
-    doSomething user1 user2
+           then !fetchUser
+           else !fetchGuest ++ " (Guest)"
+   let x = doSomething user1 user2
 -}
 
--- that doesn't actually seem too confusing to me.
+-- You might think. That doesn't actually work though, since doSomething would now have to be a monadic action for this to work, but it returns a non-monadic action, so you would have to change more...
+
+{-
+do putStrLn "hi"
+   let doSomething arg1 arg2 = do
+         if arg1 == arg2
+           then pure !fetchUser
+           else pure $ !fetchGuest ++ " (Guest)"
+   let x = !(doSomething user1 user2)
+-}
+
+-- Now let's compare this with the solution you would need with the Idris way:
+
+{-
+do putStrLn "hi"
+   let doSomething arg1 arg2 =
+         if arg1 == arg2
+           then do pure !fetchUser                   -- of course this is just fetchUser
+           else do pure $ !fetchGuest ++ " (Guest)"
+   let x = !(doSomething user1 user2)
+-}
+
+-- Not much of a difference there, and honestly, not too difficult to implement as a user. I conclude that doing it the Idris way is probably better... For now.
+
+-- One interesting question is, how does this compare with e.g. python?
+
+{-
+print("hi")
+def doSomething(arg1, arg2):
+  if arg1 == arg2:
+    return fetchUser
+  else:
+    return fetchGuest ++ " (Guest)"
+x = doSomething user1 user2
+-}
+
+-- I'm not gonna lie, that's a bit nicer than juggling pures around... But maybe that's okay.
+-- I kind of wish we had a shorter way to write "pure" as well, but I'm not doing that. 5 characters (including space) isn't that bad.
