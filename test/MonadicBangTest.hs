@@ -4,6 +4,7 @@
 {-# LANGUAGE MonadComprehensions #-}
 {-# LANGUAGE ParallelListComp #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE MultiWayIf #-}
 
 module Main (main) where
 
@@ -27,6 +28,7 @@ main = do
   listComp
   monadComp
   parListComp
+  -- multiWayIf -- don't have a test for this yet
   guards
   viewPat
   insideWhere
@@ -41,7 +43,7 @@ assertEq expected actual
 type Test = HasCallStack => IO ()
 
 withoutDo :: Test
-withoutDo = assertEq "a" !getA
+withoutDo = do assertEq "a" !getA
 
 insideDo :: Test
 insideDo = do
@@ -63,17 +65,18 @@ insideRec = assertEq (Just $ take @Int 10 $ cycle [1, -1]) $ take 10 <$> do
   pure xs
 
 nested :: Test
-nested = assertEq "Ab"
-                  !(pure (!(fmap toUpper <$> !(pure getA)) ++ !(!(pure getB))))
+nested = do assertEq "Ab"
+                     !(pure (!(fmap toUpper <$> !(pure getA)) ++ !(!(pure getB))))
 
 lambda :: Test
-lambda = assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure (!c ++ "!")) getC)
+lambda = do assertEq "abc!" $ ((\a -> a ++ !getB) !getA) ++ !((\c -> do pure (!c ++ "!")) getC)
 
 insideLet :: Test
-insideLet = assertEq "abc" !do
-  let a = !getA
-  let b _ = !getB
-  let c = !getC in pure (a ++ b b ++ c)
+insideLet = do
+  assertEq "abc" !do
+    let a = !getA
+    let b _ = !getB
+    let c = !getC in pure (a ++ b b ++ c)
 
 listComp :: Test
 listComp = assertEq @[Int]
@@ -81,7 +84,7 @@ listComp = assertEq @[Int]
   [ ![1,2,3] + y | let y = ![100,200,300] ]
 
 monadComp :: Test
-monadComp = assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]
+monadComp = do assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]
 
 parListComp :: Test
 parListComp = assertEq @[Int]
@@ -89,19 +92,19 @@ parListComp = assertEq @[Int]
   [ x + y + w + ![1000,2000] + ![10000,20000] | let x = ![1,2], let w = ![10,20] | let y = ![100,200] ]
 
 guards :: Test
-guards | [2,3,4] <- [![1,2,3] + 1 :: Int] = pure ()
-           | otherwise = error "guards didn't match"
+guards | [2,3,4] <- do [![1,2,3] + 1 :: Int] = pure ()
+       | otherwise = error "guards didn't match"
 
 viewPat :: Test
 viewPat = assertEq 9999 x
-  where (pure (!succ * !pred) -> x) = 100 :: Int
+  where (do pure (!succ * !pred) -> x) = 100 :: Int
 
 insideWhere :: Test
 insideWhere = do
   c <- getC
   assertEq "[2,3,4]c" $ show list ++ c
   where
-    list = [![1,2,3] + 1 :: Int]
+    list = do [![1,2,3] + 1 :: Int]
 
 -- insideCase :: Test
 -- insideCase = assertEq "b" case !getA of
@@ -287,3 +290,56 @@ insideWhere = do
 
 -- You could go with a rule like "Don't introduce a do-block anywhere except at the top-level of a function definition", buut maybe it makes sense to start simple.
 -- That would be a backwards-compatible change, anyway... mostly. Not entirely, since it means we also don't insert a new do for let-bindings that take arguments.
+
+-- Quick note on where:
+-- On the top-level, obviously you have no choice but to treat it as an independent block, since there can be no `do` that expressions can be evac'd in.
+-- But in local definitions, you could think about evacing to the `do` that the local definition is inside of. This is also true for where in `case`.
+-- I'm not sure I like the idea, but it's something to consider. I'm not sure that I dislike the idea, either.
+
+-- The obvious problem would be that there could be variables in !'d expressions that aren't valid outside of the where clause, but the same can happen with recursive let or let with arguments.
+-- There are two solutions to this:
+-- 1. Keep track of the variables that are in scope, and raise an error if the user tries to do something bad
+-- Pro: Better error messages
+-- Con: Adds a decent amount of complexity
+-- -> Hacky solution: At each level of the AST, replace variable names with themselves, plus one " \b" per level (space + backspace).
+-- This should work, but maybe has unintented side effects? We'd have to see.
+-- We might also be able to use Exact RdrNames, which would be a less hacky
+-- However, I'm not sure this actually makes it any easier... We still have to keep track of which names are brought in scope where so we know how many levels to add
+-- 2. Just let GHC throw errors
+-- BIG con: what happens if a variable is shadowed, does the ! just evac the outer one instead? Is there some way to avoid that?
+-- It might be worth it to just accept that for the time being... XXX JB keep that in mind when writing docs
+-- Maayyybe we could add a renamer plugin, that could go through and check these things after the fact. Of course that would require a second pass
+-- (maybe allow user to turn it off via command line option)
+-- Programming that also sounds fairly annoying though...
+-- XXX JB anyway, add a test for the above case, i.e. where you try to use variables that are not in scope
+-- (it's not obvious how to do that, since we currently don't have any tests that expect compiler errors)
+
+-- Quick note on if/case as well:
+-- Usually, the fancy thing where you evac it to the do and only do actions that are needed should be fine.
+-- But what if the scrutinee uses variables that are out of scope there?
+-- I suppose it's not any different from e.g. let. The question to consider though is if there are situations where the idris-like behavior would be more intuitive.
+-- e.g.
+
+{-
+do putStrLn "hi"
+   let doSomething arg1 arg2 =
+         if arg1 == arg2
+           then !(fetchUser)
+           else !(fetchGuest)
+    doSomething user1 user2
+-}
+
+-- I think the fancy behavior could still be fine here.
+-- How would you fix it, as a user?
+-- You would need to place a `do` inside the let, like
+
+{-
+do putStrLn "hi"
+   let doSomething arg1 arg2 = do
+         if arg1 == arg2
+           then !(fetchUser)
+           else !(fetchGuest)
+    doSomething user1 user2
+-}
+
+-- that doesn't actually seem too confusing to me.

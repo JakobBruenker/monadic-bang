@@ -45,6 +45,12 @@ import GHC.Utils.Logger
 
 -- TODO: Write user manual as haddock comment
 
+-- TODO split into modules
+
+-- TODO: mention in the documentation how unfortunately you get a parse error for each exclamation mark if you get a fatal parse error
+
+-- TODO make sure type errors in LExprs have reasonable source spans, so that users can tell where they're coming from
+
 plugin :: Plugin
 plugin = defaultPlugin
   { parsedResultAction = replaceBangs
@@ -64,6 +70,16 @@ type LExpr = LHsExpr GhcPs
 -- | Decrement column by one to get the location of a bang
 bangLoc :: Loc -> Loc
 bangLoc loc = loc{col = loc.col - 1}
+
+-- | Decrement start by one column to get the location of a bang
+bangSpan :: SrcSpan -> SrcSpan
+bangSpan sp = mkSrcSpan (bangSrcLoc $ srcSpanStart sp) (srcSpanEnd sp)
+
+-- | Decrement column by one to get the location of a bang
+bangSrcLoc :: SrcLoc -> SrcLoc
+bangSrcLoc = \cases
+  l@(UnhelpfulLoc _) -> l
+  (RealSrcLoc srcLoc _) -> liftA3 mkSrcLoc srcLocFile srcLocLine (pred . srcLocCol) srcLoc
 
 -- | Used to extract the Loc of a located expression
 pattern ExprLoc :: Loc -> Expr -> LExpr
@@ -88,11 +104,14 @@ runOffer o (OfferC s) = runState o s
 
 instance (Algebra sig m, Ord k) => Algebra (Offer k v :+: sig) (OfferC k v m) where
   alg hdl sig ctx = case sig of
-    Sum.L (Yoink k) -> OfferC $ StateC \o -> do
-      let (mv, remaining) = M.updateLookupWithKey (\_ _ -> Nothing) k o
-      pure (remaining, mv <$ ctx)
+    Sum.L (Yoink k) -> OfferC do
+      (mv, remaining) <- M.updateLookupWithKey (\_ _ -> Nothing) k <$> get
+      put remaining
+      pure (mv <$ ctx)
     Sum.R other -> OfferC (alg ((.getOfferState) . hdl) (Sum.R other) ctx)
 
+-- TODO: Maybe control with a pragma whether holes outside of `do`s are caught and replaced with a better error message referencing the plugin, or left along
+-- TODO should the fancy case/if behavior be controlled via command line flag? I.e. otherwise you get Idris-like behavior
 parseOptions :: Located HsModule -> [CommandLineOption] -> Either ErrorCall Verbosity
 parseOptions mod' options = case options of
   ["verbose"] -> pure Verbose
@@ -140,36 +159,15 @@ replaceBangs options _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 -- source span can be found in the given list.
 fillHoles :: (Data a, Has PsErrors sig m) => Map Loc LExpr -> a -> m a
 fillHoles fillers ast = do
-  (remainingErrs, ast') <- runOffer fillers $ evacWithNewDo ast
+  (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
+  -- XXX JB use error that talks about MonadicBang if the (default) option is set to do so instead of the original error
+  for_ binds \bind -> tellPsError (PsErrBangPatWithoutSpace $ bindStmtExpr bind) (bangSpan $ bindStmtSpan bind)
   pure case nonEmpty (toList remainingErrs) of
     Nothing -> ast'
     -- Just neErrs -> panic "Found extraneous bangs" -- TODO improve error msg?
     --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
     Just _neErrs -> trace "XXX JB WARNING" ast'
   where
-    evacWithNewDo :: forall a sig m . (Has (PsErrors :+: HoleFills) sig m, Data a) => a -> m a
-    evacWithNewDo e = maybe (gmapM evacWithNewDo $ e) pure =<< runMaybeT (tryInsertDo e)
-
-    -- surround the expression with a `do` if necessary
-    -- We use MaybeT since it has the MonadFail instance we want, as opposed to
-    -- the other handlers for 'Empty'
-    tryInsertDo :: forall a sig m . (Has (PsErrors :+: HoleFills) sig m, Data a) => a -> MaybeT m a
-    tryInsertDo expr = do
-      Refl <- hoistMaybe (eqT @a @LExpr)
-      (fromDList -> stmts, expr') <- runWriter (evac expr)
-      case nonEmpty stmts of
-        Nothing -> pure expr'
-        Just neStmts ->
-          -- TODO [case stmt] if we want to not touch case expressions that are statements, we need to run evac on this (located!) BodyStmt
-          --   ...Except I'm not sure that makes sense because we're running evac on the expression to find out whether we have to turn it into a statement at all (and I certainly don't want two passes)
-          --   I think it's best if we just accept that this will have separate binds. You could tell case via Reader that it shouldn't do it here or something, but then it would depend on whether or
-          --   not the case itself has bands... It gets complicated fast.
-          --   Oh! But I think if we use ! in the case we can automatically rely on it being inside a BodyStmt (or at least of a monadic type), so we can always do the simpler thing if we start here
-          let lastStmt = BodyStmt noExtField expr' noExtField noExtField
-              doStmts = (fromBindStmt <$> toList neStmts) ++ [noLocA lastStmt]
-           in pure . noLocA $
-                HsDo EpAnnNotUsed (DoExpr Nothing) (noLocA doStmts)
-
     evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
     evac e = maybe (gmapM evac $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt, tryGRHSs] ?? e)
 
@@ -190,6 +188,8 @@ fillHoles fillers ast = do
               pure $ ParStmtBlock xb stmts' vars ret
         _ -> empty
 
+    -- We use MaybeT since it has the MonadFail instance we want, as opposed to
+    -- the other handlers for 'Empty'
     tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryLExpr e = do
       Refl <- hoistMaybe (eqT @a @LExpr)
@@ -244,7 +244,7 @@ fillHoles fillers ast = do
 --         -- evacAlts [] = pure ([], [])
 --         -- evacAlts (L l match@Match{m_pats, m_ctxt, m_grhss} : lmatches) = do
 --         --   (fromDList -> firstAltBinds, pats') <- runWriter $ evac m_pats
---         --   localBinds' <- evacWithNewDo grhssLocalBinds
+--         --   localBinds' <- lookForDo grhssLocalBinds
 --         --   (binds, lmatches') <- evacAlts lmatches
 --         --   evacLGRHSs grhssGRHSs >>= \cases
 --         --     (Right grhss') -> do
@@ -344,10 +344,10 @@ fillHoles fillers ast = do
     tryGRHSs e = do
       Refl <- hoistMaybe (eqT @a @(GRHSs GhcPs LExpr))
       GRHSs exts grhss localBinds <- pure e
-      GRHSs exts <$> evac grhss <*> evacWithNewDo localBinds
+      GRHSs exts <$> evac grhss <*> evac localBinds
 
-    -- Find all !s in the given statements and combine the resulting bind
-    -- statements into listss, with the original statements being the last one
+    -- | Find all !s in the given statements and combine the resulting bind
+    -- statements into lists, with the original statements being the last one
     -- in each list - then concatenate these lists
     addStmts :: forall sig m . Has (PsErrors :+: HoleFills) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
@@ -374,6 +374,16 @@ data BindStmt = RdrName :<- LExpr
                     , val :: LExpr
                     }
 
+bindStmtExpr :: BindStmt -> LExpr
+bindStmtExpr = \cases
+  (_ :<- expr) -> expr
+  Let{val = expr} -> expr
+
+bindStmtSpan :: BindStmt -> SrcSpan
+bindStmtSpan = (.locA) . \cases
+  (_ :<- L l _) -> l
+  Let{val = L l _} -> l
+
 fromBindStmt :: BindStmt -> ExprLStmt GhcPs
 fromBindStmt = noLocA . \cases
   (var :<- lexpr) -> BindStmt EpAnnNotUsed varPat lexpr
@@ -392,11 +402,11 @@ fromBindStmt = noLocA . \cases
 
 -- Use the !'d expression if it's short enough, or else just <!expr>
 -- We don't need to worry about shadowing, since we add the line and column numbers
--- TODO Also should we instad use the first n characters followed by ... if it's too long? Seems better
 bangVar :: LExpr -> Loc -> RdrName
-bangVar (L _ expr) = case lines (showPprUnsafe expr) of
-  [str] | length str < 20 -> locVar $ "!" ++ str
-  _ -> locVar "<!expr>"
+bangVar (L _ expr) = locVar . ('!':) $ case lines (showPprUnsafe expr) of
+  (str:rest) | null rest && length str < 20 -> str
+             | otherwise                    -> take 16 str ++ "..."
+  _                                         -> "<empty expression>"
 
 locVar :: String -> Loc -> RdrName
 -- using spaces and special characters should make it impossible to overlap
@@ -412,11 +422,12 @@ locVar str loc = mkVarUnqual . fsLit $
 -- newScrutVar :: Monad m => m RdrName
 -- newScrutVar = pure . mkVarUnqual . fsLit $ "<scrutinee>"
 
+-- This is included in transformers 0.5, but that can't be used together with ghc 9.4
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
 
--- tellPsError :: Has PsErrors sig m => PsError -> SrcSpan -> m ()
--- tellPsError err srcSpan = tell . singleMessage $ MsgEnvelope srcSpan neverQualify err SevError
+tellPsError :: Has PsErrors sig m => PsError -> SrcSpan -> m ()
+tellPsError err srcSpan = tell . singleMessage $ MsgEnvelope srcSpan neverQualify err SevError
 
 -- traverseUntilLeft :: Monad f => (a -> f (Either b c)) -> [a] -> f ([c], Maybe (b, [a]))
 -- traverseUntilLeft f = fix \go -> \cases
