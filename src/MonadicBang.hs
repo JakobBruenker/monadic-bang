@@ -18,11 +18,17 @@ import Prelude hiding (log)
 import Control.Applicative
 import Control.Algebra (send, alg)
 import Control.Monad.Trans.Maybe
+import Control.Carrier.Reader
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
+import Control.Carrier.Throw.Either
 import Control.Effect.Sum hiding (L)
 import Control.Effect.Sum qualified as Sum
 import Control.Exception
+import Control.Monad
+import Data.Bifunctor
+import Data.Bool
+import Data.List (partition, intercalate)
 import Data.Data
 import Data.Maybe
 import Data.Foldable
@@ -49,8 +55,6 @@ import GHC.Utils.Logger
 
 -- TODO: mention in the documentation how unfortunately you get a parse error for each exclamation mark if you get a fatal parse error
 
--- TODO make sure type errors in LExprs have reasonable source spans, so that users can tell where they're coming from
-
 plugin :: Plugin
 plugin = defaultPlugin
   { parsedResultAction = replaceBangs
@@ -58,6 +62,10 @@ plugin = defaultPlugin
   }
 
 data Verbosity = Verbose | Quiet
+
+data PreserveErrors = Preserve | Don'tPreserve
+
+data Options = MkOptions {verbosity :: Verbosity, preserveErrors :: PreserveErrors}
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
@@ -112,34 +120,46 @@ instance (Algebra sig m, Ord k) => Algebra (Offer k v :+: sig) (OfferC k v m) wh
 
 -- TODO: Maybe control with a pragma whether holes outside of `do`s are caught and replaced with a better error message referencing the plugin, or left along
 -- TODO should the fancy case/if behavior be controlled via command line flag? I.e. otherwise you get Idris-like behavior
-parseOptions :: Located HsModule -> [CommandLineOption] -> Either ErrorCall Verbosity
-parseOptions mod' options = case options of
-  ["verbose"] -> pure Verbose
-  ["v"] -> pure Verbose
-  ["quiet"] -> pure Quiet
-  ["q"] -> pure Quiet
-  [] -> pure Quiet
-  _ -> Left . ErrorCall $
+parseOptions :: Has (Throw ErrorCall) sig m => Located HsModule -> [CommandLineOption] -> m Options
+parseOptions mod' cmdLineOpts = do
+  (remaining, options) <- runState cmdLineOpts do
+    verbosity <- bool Quiet Verbose <$> extractOpts verboseOpts
+    preserveErrors <- bool Don'tPreserve Preserve <$> extractOpts preserveErrorsOpts
+    pure $ MkOptions verbosity preserveErrors
+  when (not $ null remaining) $ throw . ErrorCall $
     "Incorrect command line options for plugin MonadicBang, encountered in " ++ modName ++ modFile ++
-    "\n\tOptions that were supplied are " ++ show options ++
-    "\n\n\tUsage: Supply a single argument chosen from v[erbose] | q[uiet]" ++
-    "\n\tThe default if no argument is supplied is \"quiet\""
+    "\n\tOptions that were supplied (via -fplugin-opt) are: " ++ intercalate ", " (map show cmdLineOpts) ++
+    "\n\tUnrecognized options: " ++ showOpts remaining ++
+    "\n\n\tUsage: [-v|--verbose] [--preserve-errors]" ++
+    "\n" ++
+    "\n\t\t-v --vebose           Print the altered AST" ++
+    "\n\t\t   --preserveErrors   Keep parse errors about ! outside of 'do' in their original form, rather then a more relevant explanation." ++
+    "\n\t\t                      This is mainly useful if another plugin that expects those errors."
+  pure options
 
   where
+    verboseOpts = ["-v", "--verbose"]
+    preserveErrorsOpts = ["--preserve-errors"]
+    extractOpts opt = do
+      (isOpt, opts') <- gets $ first (not . null) . partition (`elem` opt)
+      put opts'
+      pure isOpt
+
+    showOpts = intercalate ", " . map show
+
     modFile = fromMaybe "" $ ((" in file " ++) . unpackFS . srcSpanFile) <$> toRealSrcSpan (getLoc mod')
     modName = fromMaybe "an unnamed module" $ (("module " ++) . moduleNameString . unLoc) <$> (unLoc mod').hsmodName
-
     toRealSrcSpan = \cases
       (RealSrcSpan rss _) -> Just rss
       (UnhelpfulSpan _) -> Nothing
 
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
-replaceBangs options _ (ParsedResult (HsParsedModule mod' files) msgs) = do
-  verbosity <- liftIO . either throwIO pure $ parseOptions mod' options
-  traceShow options $ pure ()
+replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
+  options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
+  traceShow cmdLineOpts $ pure ()
   -- trace (showSDocUnsafe $ showAstData BlankSrcSpan BlankEpAnnotations mod') $ -- XXX JB
-  let (newErrors, mod'') = run . runWriter $ fillHoles fills mod'
-  log verbosity (ppr mod'')
+  let (newErrors, mod'') = run . runWriter . runReader options $ fillHoles fills mod'
+  log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
     log = \cases
@@ -157,17 +177,25 @@ replaceBangs options _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: (Data a, Has PsErrors sig m) => Map Loc LExpr -> a -> m a
+fillHoles :: (Data a, Has (PsErrors :+: Reader Options) sig m) => Map Loc LExpr -> a -> m a
 fillHoles fillers ast = do
   (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
-  -- XXX JB use error that talks about MonadicBang if the (default) option is set to do so instead of the original error
-  for_ binds \bind -> tellPsError (PsErrBangPatWithoutSpace $ bindStmtExpr bind) (bangSpan $ bindStmtSpan bind)
+  MkOptions{preserveErrors} <- ask
+  for_ binds \bind -> tellPsError (psError (bindStmtExpr bind) preserveErrors) (bangSpan $ bindStmtSpan bind)
   pure case nonEmpty (toList remainingErrs) of
     Nothing -> ast'
     -- Just neErrs -> panic "Found extraneous bangs" -- TODO improve error msg?
     --                                               -- Use PsUnknownMessage? (maybe not since this is a panic)
     Just _neErrs -> trace "XXX JB WARNING" ast'
   where
+    psError expr = \cases
+      Preserve      -> PsErrBangPatWithoutSpace expr
+      Don'tPreserve -> PsUnknownMessage $ DiagnosticMessage
+        { diagMessage = mkDecorated [text "Monadic ! outside of a 'do'-block is not allowed"]
+        , diagReason = ErrorWithoutFlag
+        , diagHints = [SuggestMissingDo]
+        }
+
     evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
     evac e = maybe (gmapM evac $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt, tryGRHSs] ?? e)
 

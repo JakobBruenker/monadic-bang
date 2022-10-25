@@ -104,4 +104,4 @@ test-suite monadic-bang-test
     build-depends:    base >=4.16.0.0 && <5,
                       monadic-bang,
 
-    ghc-options:      -fplugin=MonadicBang -fplugin-opt=MonadicBang:verbose -Wall
+    ghc-options:      -fplugin=MonadicBang -fplugin-opt=MonadicBang:-v -Wall
