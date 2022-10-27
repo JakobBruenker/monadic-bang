@@ -22,9 +22,8 @@ synopsis:           GHC plugin to desugar ! into do-notation
 -- A longer description of the package.
 description:        A plugin for GHC which takes expressions prefixed with a !
                     and effectively takes them out of their monadic context, by
-                    either creating a do-block around them or using an existing
-                    do-block surrounding the expression. Inspired by Idris's
-                    !-notation.
+                    creating bind statements in do-block surrounding the
+                    expression. Inspired by Idris's !-notation.
 
 -- URL for the project homepage or repository.
 homepage:           https://github.com/JakobBruenker/monadic-bang
@@ -56,6 +55,8 @@ library
                       MonadicBang.Internal,
                       MonadicBang.Effect.Offer,
                       MonadicBang.Effect.Uniques
+                      MonadicBang.Options
+                      MonadicBang.Utils
 
     -- Modules included in this library but not exported.
     -- other-modules:

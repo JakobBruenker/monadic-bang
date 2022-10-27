@@ -18,17 +18,11 @@ import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Carrier.Reader
 import Control.Carrier.Writer.Strict
-import Control.Carrier.State.Strict
 import Control.Carrier.Throw.Either
 import Control.Carrier.Lift
 import Control.Effect.Sum hiding (L)
 import Control.Exception
-import Control.Monad
-import Data.Bifunctor
-import Data.Bool
-import Data.List (partition, intercalate)
 import Data.Data
-import Data.Maybe
 import Data.Foldable
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
@@ -47,12 +41,8 @@ import GHC.Utils.Logger
 
 import MonadicBang.Effect.Offer
 import MonadicBang.Effect.Uniques
-
-data Verbosity = DumpTransformed | Quiet
-
-data PreserveErrors = Preserve | Don'tPreserve
-
-data Options = MkOptions {verbosity :: Verbosity, preserveErrors :: PreserveErrors}
+import MonadicBang.Options
+import MonadicBang.Utils
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
@@ -82,39 +72,6 @@ pattern ExprLoc loc expr <- L (locA -> RealSrcSpan (spanToLoc -> loc) _) expr
 
 spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
-
-parseOptions :: Has (Throw ErrorCall) sig m => Located HsModule -> [CommandLineOption] -> m Options
-parseOptions mod' cmdLineOpts = do
-  (remaining, options) <- runState cmdLineOpts do
-    verbosity <- bool Quiet DumpTransformed <$> extractOpts verboseOpts
-    preserveErrors <- bool Don'tPreserve Preserve <$> extractOpts preserveErrorsOpts
-    pure $ MkOptions verbosity preserveErrors
-  when (not $ null remaining) $ throw . ErrorCall $
-    "Incorrect command line options for plugin MonadicBang, encountered in " ++ modName ++ modFile ++
-    "\n\tOptions that were supplied (via -fplugin-opt) are: " ++ intercalate ", " (map show cmdLineOpts) ++
-    "\n\tUnrecognized options: " ++ showOpts remaining ++
-    "\n\n\tUsage: [-ddump] [-preserve-errors]" ++
-    "\n" ++
-    "\n\t\t-ddump            Print the altered AST" ++
-    "\n\t\t-preserve-errors  Keep parse errors about ! outside of 'do' in their original form, rather then a more relevant explanation." ++
-    "\n\t\t                  This is mainly useful if another plugin expects those errors."
-  pure options
-
-  where
-    verboseOpts = ["-ddump"]
-    preserveErrorsOpts = ["-preserve-errors"]
-    extractOpts opt = do
-      (isOpt, opts') <- gets $ first (not . null) . partition (`elem` opt)
-      put opts'
-      pure isOpt
-
-    showOpts = intercalate ", " . map show
-
-    modFile = fromMaybe "" $ ((" in file " ++) . unpackFS . srcSpanFile) <$> toRealSrcSpan (getLoc mod')
-    modName = fromMaybe "an unnamed module" $ (("module " ++) . moduleNameString . unLoc) <$> (unLoc mod').hsmodName
-    toRealSrcSpan = \cases
-      (RealSrcSpan rss _) -> Just rss
-      (UnhelpfulSpan _) -> Nothing
 
 replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
 replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
@@ -222,14 +179,6 @@ fillHoles fillers ast = do
       (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
       pure $ map fromBindStmt stmts ++ [lstmt']
 
-type DList a = Endo [a]
-
-fromDList :: DList a -> [a]
-fromDList = appEndo ?? []
-
-tellOne :: Has (Writer (DList w)) sig m => w -> m ()
-tellOne x = tell $ Endo (x:)
-
 type PsErrors = Writer (Messages PsError)
 type HoleFills = Offer Loc LExpr
 
@@ -264,17 +213,8 @@ locVar str spn loc = do
   unique <- freshUnique
   pure . nameRdrName $ mkInternalName unique occ spn
 
--- This is included in transformers 0.6, but that can't be used together with ghc 9.4
-hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
-hoistMaybe = MaybeT . pure
-
 tellPsError :: Has PsErrors sig m => PsError -> SrcSpan -> m ()
 tellPsError err srcSpan = tell . singleMessage $ MsgEnvelope srcSpan neverQualify err SevError
 
-(??) :: Functor f => f (a -> b) -> a -> f b
-fs ?? x = ($ x) <$> fs
-
-panic :: String -> a
-panic message = error $ unlines ["MonadicBang panic:", message, "", submitReport]
-  where
-    submitReport = "This is likely a bug. Please submit a bug report under https://github.com/JakobBruenker/monadic-bang/issues"
+tellOne :: Has (Writer (DList w)) sig m => w -> m ()
+tellOne x = tell $ Endo (x:)
