@@ -190,6 +190,12 @@ fillHoles fillers ast = do
         }
 
     evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
+    -- This recurses over all nodes in the AST, except for nodes for which
+    -- one of the `try` functions returns `Just <something>`.
+    -- TODO: Via benchmarking, find out whether it makes sense to `try` more
+    -- datatypes here (e.g. `tryRdrName`) that would always remain unmodified
+    -- anyway due to not containing expressions, and thus don't need to be
+    -- recursed over
     evac e = maybe (gmapM evac $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt] ?? e)
 
     tryStmt :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
@@ -207,6 +213,7 @@ fillHoles fillers ast = do
             addParStmts (ParStmtBlock xb stmts vars ret) = do
               stmts' <- addStmts stmts
               pure $ ParStmtBlock xb stmts' vars ret
+
         _ -> empty
 
     -- We use MaybeT since it has the MonadFail instance we want, as opposed to
@@ -226,6 +233,18 @@ fillHoles fillers ast = do
           tellOne (name :<- lexpr')
           evac . L l $  HsVar noExtField (noLocA name)
         HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> traverse addStmts stmts
+
+        -- the remaining cases are only added to aid in performance, to avoid
+        -- recursing over their constructor arguments, which don't contain
+        -- expressions anyway
+        HsVar{} -> pure e
+        HsRecSel{} -> pure e
+        HsOverLabel{} -> pure e
+        HsIPVar{} -> pure e
+        HsOverLit{} -> pure e
+        HsLit{} -> pure e
+        HsProjection{} -> pure e
+
         _ -> empty
 
     -- | Find all !s in the given statements and combine the resulting bind
