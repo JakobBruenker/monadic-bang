@@ -6,6 +6,8 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE MultiWayIf #-}
 
+{-# OPTIONS -fplugin=MonadicBang -fplugin-opt=MonadicBang:-v #-}
+
 module Main (main) where
 
 import GHC.Stack
@@ -28,11 +30,11 @@ main = do
   listComp
   monadComp
   parListComp
-  -- multiWayIf -- don't have a test for this yet
+  multiWayIf
   guards
   viewPat
   insideWhere
-  -- insideCase
+  insideCase
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual
@@ -106,17 +108,27 @@ insideWhere = do
   where
     list = do [![1,2,3] + 1 :: Int]
 
--- insideCase :: Test
--- insideCase = assertEq "b" case !getA of
---   a -> "b"
---   (!(pure (++ "_")) -> "d") -> "c"
---   c -> "d"
+insideCase :: Test
+-- Fun fact: 
+-- This:
+-- insideCase = do assertEq "b"
+--   case !getA of
+-- wouldn't work because it's parsed as `(do assertEq "b") case !getA of`
+-- which would mean !getA is not inside a do-block
+insideCase = do
+  assertEq "b"
+    case !getA of
+      (!(pure (++ "_")) -> "d") -> c ++ s123
+        where c = !getC
+              s123 = do pure !"123"
+      "c" -> "d"
+      _a -> "b"
 
-  -- something | 1 == 0 -> !getA ++ !getA
-  -- something@"a" | something == "b" -> !getC
-  --               | something == !getA -> !getB
-  -- "b" | !getB == !getB -> !getC
-  -- _ -> ""
+multiWayIf :: Test
+multiWayIf = do
+  assertEq "b" if
+    | !getA == !getA -> !getB
+    | otherwise      -> !getC
 
 -- DONE:
 -- guards
@@ -312,7 +324,7 @@ insideWhere = do
 -- (maybe allow user to turn it off via command line option)
 -- Programming that also sounds fairly annoying though...
 -- XXX JB anyway, add a test for the above case, i.e. where you try to use variables that are not in scope
--- (it's not obvious how to do that, since we currently don't have any tests that expect compiler errors)
+-- (it's not obvious how to do that, since we currently don't have any tests that expect compiler errors - maybe you can start a ghc session inside of this code to do it)
 
 -- Thinking about case a bit more, a reasonable compromise might be:
 -- - We have the special behavior for any expression in the rhs of case
