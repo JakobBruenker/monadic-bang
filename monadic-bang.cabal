@@ -52,7 +52,8 @@ extra-source-files:
 
 library
     -- Modules exported by the library.
-    exposed-modules:  MonadicBang
+    exposed-modules:  MonadicBang,
+                      MonadicBang.Effect.Offer
 
     -- Modules included in this library but not exported.
     -- other-modules:

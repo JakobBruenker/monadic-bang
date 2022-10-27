@@ -9,21 +9,18 @@
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE StrictData #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DerivingStrategies #-}
 
 module MonadicBang (plugin) where
 
 import Prelude hiding (log)
 import Control.Applicative
-import Control.Algebra (send, alg)
 import Control.Monad.Trans.Maybe
 import Control.Carrier.Reader
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Carrier.Throw.Either
 import Control.Effect.Sum hiding (L)
-import Control.Effect.Sum qualified as Sum
 import Control.Exception
 import Control.Monad
 import Data.Bifunctor
@@ -48,9 +45,13 @@ import Debug.Trace
 
 import GHC.Utils.Logger
 
+import MonadicBang.Effect.Offer
+
 -- TODO: Write user manual as haddock comment
 
 -- TODO: mention in the documentation how unfortunately you get a parse error for each exclamation mark if you get a fatal parse error
+
+-- TODO mention in documentation how shadowing is an issue
 
 plugin :: Plugin
 plugin = defaultPlugin
@@ -92,28 +93,6 @@ pattern ExprLoc loc expr <- L (locA -> RealSrcSpan (spanToLoc -> loc) _) expr
 
 spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
-
--- Offers a number of things that can be yoinked, but only once
-data Offer k v m a where
-  Yoink :: k -> Offer k v m (Maybe v)
-
-yoink :: (Has (Offer k v) sig m) => k -> m (Maybe v)
-yoink = send . Yoink
-
-newtype OfferC k v m a = OfferC {getOfferState :: StateC (Map k v) m a}
-  deriving newtype (Functor, Applicative, Monad)
-
--- Returns the result of the computation, along with the remaining offers
-runOffer :: Map k v -> OfferC k v m a -> m (Map k v, a)
-runOffer o (OfferC s) = runState o s
-
-instance (Algebra sig m, Ord k) => Algebra (Offer k v :+: sig) (OfferC k v m) where
-  alg hdl sig ctx = case sig of
-    Sum.L (Yoink k) -> OfferC do
-      (mv, remaining) <- M.updateLookupWithKey (\_ _ -> Nothing) k <$> get
-      put remaining
-      pure (mv <$ ctx)
-    Sum.R other -> OfferC (alg ((.getOfferState) . hdl) (Sum.R other) ctx)
 
 parseOptions :: Has (Throw ErrorCall) sig m => Located HsModule -> [CommandLineOption] -> m Options
 parseOptions mod' cmdLineOpts = do
@@ -283,7 +262,8 @@ fromBindStmt = noLocA . \cases
       varPat = noLocA . VarPat noExtField $ noLocA var
 
 -- Use the !'d expression if it's short enough, or else just <!expr>
--- We don't need to worry about shadowing, since we add the line and column numbers
+-- We don't need to worry about shadowing other !'d expressions, since we add
+-- the line and column numbers
 bangVar :: LExpr -> Loc -> RdrName
 bangVar (L _ expr) = locVar . ('!':) $ case lines (showPprUnsafe expr) of
   (str:rest) | null rest && length str < 20 -> str
@@ -295,8 +275,8 @@ locVar :: String -> Loc -> RdrName
 -- with user-defined names (but could still technically overlap with names
 -- introduced by other plugins)
 -- TODO is there a way to make a RdrName that's guaranteed to be unique, but has this as OccName? Maybe nameRdrName with mkInternalName
--- TODO however you need a unique for that, and all the ways I can see to make uniques are determinstic, so not sure they would actually be "unique"
--- TODO unless UniqSupply works?
+-- however you need a unique for that, and all the ways I can see to make uniques are determinstic, so not sure they would actually be "unique"
+-- unless UniqSupply works?
 locVar str loc = mkVarUnqual . fsLit $
   printf "<%s:%d:%d>" str loc.line loc.col
 
