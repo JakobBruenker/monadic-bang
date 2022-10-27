@@ -269,38 +269,18 @@ type HoleFills = Offer Loc LExpr
 type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills
 
 data BindStmt = RdrName :<- LExpr
-              -- let var param1 ... paramn = val
-              -- XXX JB I don't think we need this anymore
-              | Let { var :: RdrName
-                    , params :: [RdrName]
-                    , val :: LExpr
-                    }
 
 bindStmtExpr :: BindStmt -> LExpr
-bindStmtExpr = \cases
-  (_ :<- expr) -> expr
-  Let{val = expr} -> expr
+bindStmtExpr (_ :<- expr) = expr
 
 bindStmtSpan :: BindStmt -> SrcSpan
-bindStmtSpan = (.locA) . \cases
-  (_ :<- L l _) -> l
-  Let{val = L l _} -> l
+bindStmtSpan = (.locA) . \(_ :<- L l _) -> l
 
 fromBindStmt :: BindStmt -> ExprLStmt GhcPs
 fromBindStmt = noLocA . \cases
   (var :<- lexpr) -> BindStmt EpAnnNotUsed varPat lexpr
     where
       varPat = noLocA . VarPat noExtField $ noLocA var
-  Let{var, params, val} -> LetStmt EpAnnNotUsed $ binding
-    where
-      lvar = noLocA var
-      binding = HsValBinds EpAnnNotUsed valBinds
-      valBinds = ValBinds NoAnnSortKey (unitBag . noLocA $ FunBind noExtField lvar mg []) []
-      mg = MG noExtField (noLocA [noLocA match]) Generated
-      pats = noLocA . VarPat noExtField . noLocA <$> params
-      match = Match EpAnnNotUsed (FunRhs lvar GHC.Prefix NoSrcStrict) pats . GRHSs emptyComments [rhs] $
-        EmptyLocalBinds noExtField
-      rhs = noLocA $ GRHS EpAnnNotUsed [] val
 
 -- Use the !'d expression if it's short enough, or else just <!expr>
 -- We don't need to worry about shadowing, since we add the line and column numbers
