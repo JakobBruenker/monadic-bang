@@ -58,7 +58,7 @@ plugin = defaultPlugin
   -- , pluginRecompile = purePlugin -- XXX JB the plugin is pure, just commenting it out so we can see the output every time we run the tests
   }
 
-data Verbosity = Verbose | Quiet
+data Verbosity = DumpTransformed | Quiet
 
 data PreserveErrors = Preserve | Don'tPreserve
 
@@ -118,23 +118,23 @@ instance (Algebra sig m, Ord k) => Algebra (Offer k v :+: sig) (OfferC k v m) wh
 parseOptions :: Has (Throw ErrorCall) sig m => Located HsModule -> [CommandLineOption] -> m Options
 parseOptions mod' cmdLineOpts = do
   (remaining, options) <- runState cmdLineOpts do
-    verbosity <- bool Quiet Verbose <$> extractOpts verboseOpts
+    verbosity <- bool Quiet DumpTransformed <$> extractOpts verboseOpts
     preserveErrors <- bool Don'tPreserve Preserve <$> extractOpts preserveErrorsOpts
     pure $ MkOptions verbosity preserveErrors
   when (not $ null remaining) $ throw . ErrorCall $
     "Incorrect command line options for plugin MonadicBang, encountered in " ++ modName ++ modFile ++
     "\n\tOptions that were supplied (via -fplugin-opt) are: " ++ intercalate ", " (map show cmdLineOpts) ++
     "\n\tUnrecognized options: " ++ showOpts remaining ++
-    "\n\n\tUsage: [-v|--verbose] [--preserve-errors]" ++
+    "\n\n\tUsage: [-ddump] [-preserve-errors]" ++
     "\n" ++
-    "\n\t\t-v --vebose           Print the altered AST" ++
-    "\n\t\t   --preserveErrors   Keep parse errors about ! outside of 'do' in their original form, rather then a more relevant explanation." ++
-    "\n\t\t                      This is mainly useful if another plugin that expects those errors."
+    "\n\t\t-ddump            Print the altered AST" ++
+    "\n\t\t-preserve-errors  Keep parse errors about ! outside of 'do' in their original form, rather then a more relevant explanation." ++
+    "\n\t\t                  This is mainly useful if another plugin expects those errors."
   pure options
 
   where
-    verboseOpts = ["-v", "--verbose"]
-    preserveErrorsOpts = ["--preserve-errors"]
+    verboseOpts = ["-ddump"]
+    preserveErrorsOpts = ["-preserve-errors"]
     extractOpts opt = do
       (isOpt, opts') <- gets $ first (not . null) . partition (`elem` opt)
       put opts'
@@ -159,7 +159,7 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   where
     log = \cases
       Quiet _ -> pure ()
-      Verbose m -> do
+      DumpTransformed m -> do
         logger <- getLogger
         liftIO $ logMsg logger MCInfo (UnhelpfulSpan UnhelpfulNoLocationInfo) m
 
@@ -218,9 +218,10 @@ fillHoles fillers ast = do
       L l _ <- pure e
       case expr of
         -- Replace holes resulting from `!`
-        -- TODO: !_ doesn't work, I think we have to make sure here only to try to fill it if it's actually a bang error
+        -- If no corresponding expression can be found in the Offer, we assume
+        -- that it was a hole put there by the user and leave it unmodified
         HsUnboundVar _ _ -> do
-          lexpr' <- evac =<< fromMaybe (panic "Couldn't find hole filler") <$> yoink loc -- maybe improve error message
+          lexpr' <- evac =<< MaybeT (yoink loc)
           let name = bangVar lexpr' loc
           tellOne (name :<- lexpr')
           evac . L l $  HsVar noExtField (noLocA name)

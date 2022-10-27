@@ -6,7 +6,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE MultiWayIf #-}
 
-{-# OPTIONS -fplugin=MonadicBang -fplugin-opt=MonadicBang:-v #-}
+{-# OPTIONS -fplugin=MonadicBang -fplugin-opt=MonadicBang:-ddump #-}
 
 module Main (main) where
 
