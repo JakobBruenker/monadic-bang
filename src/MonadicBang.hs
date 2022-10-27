@@ -20,6 +20,7 @@ import Control.Carrier.Reader
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Carrier.Throw.Either
+import Control.Carrier.Lift
 import Control.Effect.Sum hiding (L)
 import Control.Exception
 import Control.Monad
@@ -46,6 +47,7 @@ import Debug.Trace
 import GHC.Utils.Logger
 
 import MonadicBang.Effect.Offer
+import MonadicBang.Effect.Uniques
 
 -- TODO: Write user manual as haddock comment
 
@@ -132,7 +134,7 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
   -- trace (showSDocUnsafe $ showAstDataFull mod') $ -- XXX JB
-  let (newErrors, mod'') = run . runWriter . runReader options $ fillHoles fills mod'
+  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options $ fillHoles fills mod'
   log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
@@ -151,7 +153,7 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: (Data a, Has (PsErrors :+: Reader Options) sig m) => Map Loc LExpr -> a -> m a
+fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques) sig m) => Map Loc LExpr -> a -> m a
 fillHoles fillers ast = do
   (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
   MkOptions{preserveErrors} <- ask
@@ -208,7 +210,7 @@ fillHoles fillers ast = do
         -- that it was a hole put there by the user and leave it unmodified
         HsUnboundVar _ _ -> do
           lexpr' <- evac =<< MaybeT (yoink loc)
-          let name = bangVar lexpr' loc
+          name <- bangVar lexpr' loc
           tellOne (name :<- lexpr')
           evac . L l $  HsVar noExtField (noLocA name)
         HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> traverse addStmts stmts
@@ -229,7 +231,7 @@ fillHoles fillers ast = do
     -- | Find all !s in the given statements and combine the resulting bind
     -- statements into lists, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: forall sig m . Has (PsErrors :+: HoleFills) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
       (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
       pure $ map fromBindStmt stmts ++ [lstmt']
@@ -245,7 +247,7 @@ tellOne x = tell $ Endo (x:)
 type PsErrors = Writer (Messages PsError)
 type HoleFills = Offer Loc LExpr
 
-type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills
+type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques
 
 data BindStmt = RdrName :<- LExpr
 
@@ -264,21 +266,17 @@ fromBindStmt = noLocA . \cases
 -- Use the !'d expression if it's short enough, or else just <!expr>
 -- We don't need to worry about shadowing other !'d expressions, since we add
 -- the line and column numbers
-bangVar :: LExpr -> Loc -> RdrName
-bangVar (L _ expr) = locVar . ('!':) $ case lines (showPprUnsafe expr) of
+bangVar :: Has Uniques sig m => LExpr -> Loc -> m RdrName
+bangVar (L spn expr) = (locVar . ('!':)) ?? spn.locA $ case lines (showPprUnsafe expr) of
   (str:rest) | null rest && length str < 20 -> str
              | otherwise                    -> take 16 str ++ "..."
   _                                         -> "<empty expression>"
 
-locVar :: String -> Loc -> RdrName
--- using spaces and special characters should make it impossible to overlap
--- with user-defined names (but could still technically overlap with names
--- introduced by other plugins)
--- TODO is there a way to make a RdrName that's guaranteed to be unique, but has this as OccName? Maybe nameRdrName with mkInternalName
--- however you need a unique for that, and all the ways I can see to make uniques are determinstic, so not sure they would actually be "unique"
--- unless UniqSupply works?
-locVar str loc = mkVarUnqual . fsLit $
-  printf "<%s:%d:%d>" str loc.line loc.col
+locVar :: Has Uniques sig m => String -> SrcSpan -> Loc -> m RdrName
+locVar str spn loc = do
+  let occ = mkVarOcc $ printf "<%s:%d:%d>" str loc.line loc.col
+  unique <- freshUnique
+  pure . nameRdrName $ mkInternalName unique occ spn
 
 -- This is included in transformers 0.5, but that can't be used together with ghc 9.4
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
