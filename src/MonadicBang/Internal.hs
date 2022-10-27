@@ -264,7 +264,7 @@ locVar str spn loc = do
   unique <- freshUnique
   pure . nameRdrName $ mkInternalName unique occ spn
 
--- This is included in transformers 0.5, but that can't be used together with ghc 9.4
+-- This is included in transformers 0.6, but that can't be used together with ghc 9.4
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
 

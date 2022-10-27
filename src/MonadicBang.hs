@@ -12,5 +12,5 @@ import MonadicBang.Internal
 plugin :: Plugin
 plugin = defaultPlugin
   { parsedResultAction = replaceBangs
-  -- , pluginRecompile = purePlugin -- XXX JB the plugin is pure, just commenting it out so we can see the output every time we run the tests
+  , pluginRecompile = purePlugin
   }
