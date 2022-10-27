@@ -109,12 +109,6 @@ insideWhere = do
     list = do [![1,2,3] + 1 :: Int]
 
 insideCase :: Test
--- Fun fact: 
--- This:
--- insideCase = do assertEq "b"
---   case !getA of
--- wouldn't work because it's parsed as `(do assertEq "b") case !getA of`
--- which would mean !getA is not inside a do-block
 insideCase = do
   assertEq "b"
     case !getA of
@@ -129,3 +123,8 @@ multiWayIf = do
   assertEq "b" if
     | !getA == !getA -> !getB
     | otherwise      -> !getC
+
+shouldFail :: Test
+shouldFail = do
+  let y = let x = print 24 in !x
+  pure y

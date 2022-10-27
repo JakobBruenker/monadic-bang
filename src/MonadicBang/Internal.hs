@@ -77,7 +77,7 @@ replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedR
 replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
-  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options $ fillHoles fills mod'
+  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader emptyOccSet $ fillHoles fills mod'
   log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
@@ -96,7 +96,7 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques) sig m) => Map Loc LExpr -> a -> m a
+fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars) sig m) => Map Loc LExpr -> a -> m a
 fillHoles fillers ast = do
   (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
   MkOptions{preserveErrors} <- ask
@@ -120,7 +120,39 @@ fillHoles fillers ast = do
     -- datatypes here (e.g. `tryRdrName`) that would always remain unmodified
     -- anyway due to not containing expressions, and thus don't need to be
     -- recursed over
-    evac e = maybe (gmapM evac $ e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt] ?? e)
+    evac e = maybe (gmapM evac e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt] ?? e)
+
+    -- We use MaybeT since it has the MonadFail instance we want, as opposed to
+    -- the other handlers for 'Empty'
+    tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
+    tryLExpr e = do
+      Refl <- hoistMaybe (eqT @a @LExpr)
+      ExprLoc loc expr <- pure e
+      let L l _ = e
+      case expr of
+        -- Replace holes resulting from `!`
+        -- If no corresponding expression can be found in the Offer, we assume
+        -- that it was a hole put there by the user and leave it unmodified
+        HsUnboundVar _ _ -> do
+          yoink loc >>= maybe (pure e) \lexpr -> do
+            lexpr' <- evac lexpr
+            name <- bangVar lexpr' loc
+            tellOne $ name :<- lexpr'
+            evac . L l $ HsVar noExtField (noLocA name)
+        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> traverse addStmts stmts
+
+        -- the remaining cases are only added to aid in performance, to avoid
+        -- recursing over their constructor arguments, which don't contain
+        -- expressions anyway
+        HsVar{} -> pure e
+        HsRecSel{} -> pure e
+        HsOverLabel{} -> pure e
+        HsIPVar{} -> pure e
+        HsOverLit{} -> pure e
+        HsLit{} -> pure e
+        HsProjection{} -> pure e
+
+        _ -> empty
 
     tryStmt :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryStmt e = do
@@ -140,49 +172,22 @@ fillHoles fillers ast = do
 
         _ -> empty
 
-    -- We use MaybeT since it has the MonadFail instance we want, as opposed to
-    -- the other handlers for 'Empty'
-    tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-    tryLExpr e = do
-      Refl <- hoistMaybe (eqT @a @LExpr)
-      ExprLoc loc expr <- pure e
-      L l _ <- pure e
-      case expr of
-        -- Replace holes resulting from `!`
-        -- If no corresponding expression can be found in the Offer, we assume
-        -- that it was a hole put there by the user and leave it unmodified
-        HsUnboundVar _ _ -> do
-          lexpr' <- evac =<< MaybeT (yoink loc)
-          name <- bangVar lexpr' loc
-          tellOne (name :<- lexpr')
-          evac . L l $  HsVar noExtField (noLocA name)
-        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> traverse addStmts stmts
-
-        -- the remaining cases are only added to aid in performance, to avoid
-        -- recursing over their constructor arguments, which don't contain
-        -- expressions anyway
-        HsVar{} -> pure e
-        HsRecSel{} -> pure e
-        HsOverLabel{} -> pure e
-        HsIPVar{} -> pure e
-        HsOverLit{} -> pure e
-        HsLit{} -> pure e
-        HsProjection{} -> pure e
-
-        _ -> empty
-
     -- | Find all !s in the given statements and combine the resulting bind
     -- statements into lists, with the original statements being the last one
     -- in each list - then concatenate these lists
-    addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+    addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques :+: LocalVars) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
     addStmts = concatMapM \lstmt -> do
       (fromDList -> stmts, lstmt') <- runWriter (evac lstmt)
       pure $ map fromBindStmt stmts ++ [lstmt']
 
 type PsErrors = Writer (Messages PsError)
 type HoleFills = Offer Loc LExpr
+-- | We keep track of variables that are bound in lambdas, cases, etc., since
+-- these are variables that will not be accessible in the surrounding
+-- 'do'-block, and must therefore not be used
+type LocalVars = Reader OccSet
 
-type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques
+type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques :+: LocalVars
 
 data BindStmt = RdrName :<- LExpr
 
