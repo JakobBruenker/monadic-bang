@@ -139,13 +139,14 @@ fillHoles fillers ast = do
     -- with ! in situations where they would be evacuated to a place where
     -- they're not in scope
     -- XXX JB we need to make sure funbinds also add a local variable
+    -- XXX JB but see XXX JB below about tryRdrName, that should fix it
     tryMatch :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryMatch = try \(match@Match{ m_pats = pats
                                 , m_grhss = grhss@GRHSs{ grhssGRHSs = grhssGrhss
                                                       , grhssLocalBinds = localBinds
                                                       }
                                 } :: Match GhcPs LExpr) -> do
-      traceM "trying match"
+      traceM "doing match"
       -- We use the State to keep track of the bindings that have been
       -- introduced in patterns to the left of the one we're currently looking
       -- at. Example:
@@ -165,12 +166,12 @@ fillHoles fillers ast = do
         evacPats :: forall a' m' sig' . (Has (Fill :+: State OccSet) sig' m', Data a') => a' -> m' a'
         evacPats e = do
           currentState <- get @OccSet
-          maybe (gmapM evac e) pure =<< runMaybeT (tryEvac ((local' (const currentState) .) <$> (tryPat : usualTries)) e)
+          maybe (gmapM evacPats e) pure =<< runMaybeT (tryEvac ((local' (const currentState) .) <$> (tryPat : usualTries)) e)
 
           where
+            -- I think we should replace this by tryRdrName -- XXX JB
             tryPat :: forall a'' . Data a'' => a'' -> MaybeT m' a''
-            -- XXX JB why do we not reach this?
-            tryPat = try \(p :: Pat GhcPs) -> trace ("matching pattern " ++ showPprUnsafe p) case p of
+            tryPat = trace ("trying pattern " ++ show (typeRep (Nothing @a''))) try \(p :: Pat GhcPs) -> trace ("matching pattern " ++ showPprUnsafe p) case p of
               VarPat xv name -> tellName name $> VarPat xv name
               AsPat xa name pat -> do
                 tellName name
