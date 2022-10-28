@@ -35,7 +35,7 @@ import GHC.Data.Maybe
 import GHC.Parser.Errors.Types
 import GHC.Plugins hiding (Expr, empty, (<>), panic, try)
 import GHC.Types.Error
-import GHC.Utils.Monad (concatMapM)
+import GHC.Utils.Monad (concatMapM, whenM)
 import Text.Printf
 
 import Debug.Trace
@@ -46,6 +46,8 @@ import MonadicBang.Effect.Offer
 import MonadicBang.Effect.Uniques
 import MonadicBang.Options
 import MonadicBang.Utils
+
+-- TODO: do we want to add Reader DynFlags with showPpr instead of using showPprUnsafe?
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
@@ -106,7 +108,7 @@ fillHoles fillers ast = do
   for_ binds \bind -> tellPsError (psError (bindStmtExpr bind) preserveErrors) (bangSpan $ bindStmtSpan bind)
   pure if null remainingErrs
     then ast'
-    else panic $ "Found extraneous bangs:" ++ unlines (showSDocUnsafe . ppr <$> toList remainingErrs)
+    else panic $ "Found extraneous bangs:" ++ unlines (showPprUnsafe <$> toList remainingErrs)
   where
     psError expr = \cases
       Preserve      -> PsErrBangPatWithoutSpace expr
@@ -130,72 +132,53 @@ fillHoles fillers ast = do
     -- anyway due to not containing expressions, and thus don't need to be
     -- recursed over
     usualTries :: (Has Fill sig m, Data a) => [a -> MaybeT m a]
-    -- usualTries = [tryMatch, tryLExpr, tryStmt] -- XXX JB
-    usualTries = [tryLExpr, tryStmt]
+    usualTries = [tryMatch, tryLExpr, tryStmt] -- XXX JB
+    -- usualTries = [tryLExpr, tryStmt]
 
-    -- We keep track of any local binds, to prevent the user from using them in
-    -- situations where they would be evacuated to a place where they're not in
-    -- scope
+    -- We keep track of any local' binds, to prevent the user from using them
+    -- with ! in situations where they would be evacuated to a place where
+    -- they're not in scope
+    -- XXX JB we need to make sure funbinds also add a local variable
     tryMatch :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-    tryMatch = try \(e@Match{ m_pats
-                            , m_grhss = GRHSs{ grhssGRHSs = map unLoc -> grhss
-                                             , grhssLocalBinds = localBinds
-                                             }
-                            } :: Match GhcPs LExpr) -> do
-      -- We use the Writer to collect local bindings, and the State to keep
-      -- track of the bindings that have been introduced in patterns to the
-      -- left of the one we're currently looking at. Example:
+    tryMatch = try \(match@Match{ m_pats = pats
+                                , m_grhss = grhss@GRHSs{ grhssGRHSs = grhssGrhss
+                                                      , grhssLocalBinds = localBinds
+                                                      }
+                                } :: Match GhcPs LExpr) -> do
+      traceM "trying match"
+      -- We use the State to keep track of the bindings that have been
+      -- introduced in patterns to the left of the one we're currently looking
+      -- at. Example:
       --   \a (Just [b, (+ b) -> d]) (foldr a b -> c) | Just f <- b, f == 24
       -- the view pattern on `c` has access to the variables to the left of it. The same applies to `d`.
       -- `f == 24` additionally has access to variables defined in the guard to its left.
-      -- pvars <- liftMaybeT $ foldMapA evacPat pats
-      -- IMPORTANT: initialize the state with the current reader value
-      pure e
+      (patVars, m_pats) <- ask @OccSet >>= runState ?? evacPats pats
+      traceM $ "match patVars" ++ showPprUnsafe patVars
+      traceM $ showPprUnsafe pats
+      traceM $ showPprUnsafe match
+      grhssLocalBinds <- local' (const patVars) $ evac localBinds
+      grhssGRHSs <- evalState patVars $ evacPats grhssGrhss
+      pure match{m_pats, m_grhss = grhss{grhssGRHSs, grhssLocalBinds}}
 
       where
         -- evacuate !s in pattern and collect all the names it binds
-        evacPats :: forall m' sig' . (Has (Fill :+: State OccSet) sig' m') => [LPat GhcPs] -> m' ([LPat GhcPs])
-        evacPats = go
-          where
-            go :: Data a' => a' -> m' a'
-            go e = do
-              currentState <- get @OccSet
-              maybe (gmapM evac e) pure =<< runMaybeT (tryEvac ((local (const currentState) .) <$> (tryPat : usualTries)) e)
+        evacPats :: forall a' m' sig' . (Has (Fill :+: State OccSet) sig' m', Data a') => a' -> m' a'
+        evacPats e = do
+          currentState <- get @OccSet
+          maybe (gmapM evac e) pure =<< runMaybeT (tryEvac ((local' (const currentState) .) <$> (tryPat : usualTries)) e)
 
-            tryPat :: Data a' => a' -> MaybeT m' a'
-            tryPat = try \(p :: Pat GhcPs) -> case p of
+          where
+            tryPat :: forall a'' . Data a'' => a'' -> MaybeT m' a''
+            -- XXX JB why do we not reach this?
+            tryPat = try \(p :: Pat GhcPs) -> trace ("matching pattern " ++ showPprUnsafe p) case p of
               VarPat xv name -> tellName name $> VarPat xv name
               AsPat xa name pat -> do
                 tellName name
-                AsPat xa name <$> traverse (liftMaybeT . go) pat
+                AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
 
               _ -> empty
               where
-                tellName name = modify (extendOccSet ?? occName (unLoc name))
-
-                -- XXX JB
-        -- evacPat = \case
-        --   (liftA2 . liftA2) fromMaybe (gmapM evacPat)
-          -- VarPat xv name -> tellName name $> VarPat xv name
-          -- LazyPat xl pat -> LazyPat xl <$> traverse evacPat pat
-          -- AsPat xa name pat  -> do
-          --   tellName name
-          --   AsPat xa name <$> traverse evacPat pat
-          -- ParPat xp _ pat _ -> evacLPat pat
-          -- BangPat _ pat -> evacLPat pat
-          -- ListPat xl pats -> traverse evacLPat pats >>= \(unzip -> pats') -> undefined -- XXX JB actually vars from first pattern are avail in second and so on
-          -- TuplePat _ pats _ -> traverse evacLPat pats >>= \(unzip -> pats') -> undefined
-          -- SumPat _ pat _ _ -> evacLPat pat
-          -- ConPat _ _ (hsConPatArgs -> pats) -> foldMapA evacLPat pats
-          -- ViewPat xv expr (L l pat) -> do
-          --   (pat', vars) <- evacPat pat
-          --   expr' <- local (<> vars) $ evac expr
-          --   pure (ViewPat xv expr' (L l pat'), vars)
-
-          -- _ -> undefined
-
-          -- where evacLPat = evacPat . unLoc
-          --       tellName = tell . unitOccSet . occName . unLoc
+                tellName name = trace "XXX TELLING" modify (extendOccSet ?? occName (unLoc name))
 
     tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryLExpr = try \e@(L l _) -> do
@@ -209,11 +192,11 @@ fillHoles fillers ast = do
           name <- bangVar lexpr' loc
           tellOne $ name :<- lexpr'
           evac . L l $ HsVar noExtField (noLocA name)
-        -- HsVar _ (occName . unLoc -> name) -> do
-        --   whenM (elemOccSet name <$> ask) $ tellPsError PsErrUnpackDataCon l.locA -- XXX JB use proper error message
-        --   pure e
-        -- XXX JB must reset the LocalVars here with local
-        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> traverse addStmts stmts
+        HsVar _ (occName . unLoc -> name) -> do
+          traceM . showPprUnsafe =<< ask @OccSet
+          whenM (elemOccSet name <$> ask) $ tellPsError PsErrUnpackDataCon l.locA -- XXX JB use proper error message
+          pure e
+        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local' (const emptyOccSet) (traverse addStmts stmts)
 
         -- TODO: check whether manually writing more cases here (espcially ones
         -- without expression where you can just return `pure e` improves
@@ -289,3 +272,9 @@ tellPsError err srcSpan = tell . singleMessage $ MsgEnvelope srcSpan neverQualif
 
 tellOne :: Has (Writer (DList w)) sig m => w -> m ()
 tellOne x = tell $ Endo (x:)
+
+-- XXX JB
+local' :: forall a sig m r . (Outputable r, Has (Reader r) sig m) => (r -> r) -> m a -> m a 
+local' f a = do
+  traceM . ("XXX JB local'" ++). showPprUnsafe =<< ask @r
+  local f a
