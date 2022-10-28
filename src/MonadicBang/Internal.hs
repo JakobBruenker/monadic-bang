@@ -18,19 +18,22 @@ import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Carrier.Reader
 import Control.Carrier.Writer.Strict
+import Control.Carrier.State.Strict
 import Control.Carrier.Throw.Either
 import Control.Carrier.Lift
 import Control.Effect.Sum hiding (L)
-import Control.Exception
+import Control.Exception hiding (try)
 import Data.Data
 import Data.Foldable
+import Data.Functor
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.Monoid
 import GHC
 import GHC.Data.Bag
+import GHC.Data.Maybe
 import GHC.Parser.Errors.Types
-import GHC.Plugins hiding (Expr, empty, (<>), panic)
+import GHC.Plugins hiding (Expr, empty, (<>), panic, try)
 import GHC.Types.Error
 import GHC.Utils.Monad (concatMapM)
 import Text.Printf
@@ -113,50 +116,113 @@ fillHoles fillers ast = do
         , diagHints = [SuggestMissingDo]
         }
 
+        -- XXX JB seems like we probably only need one evac, not two
     evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
     -- This recurses over all nodes in the AST, except for nodes for which
     -- one of the `try` functions returns `Just <something>`.
+    evac e = maybe (gmapM evac e) pure =<< runMaybeT (tryEvac usualTries e)
+
+    tryEvac :: Monad m => [a -> MaybeT m a] -> a -> MaybeT m a
+    tryEvac tries = asum . (tries ??)
+
     -- TODO: Via benchmarking, find out whether it makes sense to `try` more
     -- datatypes here (e.g. `tryRdrName`) that would always remain unmodified
     -- anyway due to not containing expressions, and thus don't need to be
     -- recursed over
-    evac e = maybe (gmapM evac e) pure =<< runMaybeT (asum $ [tryLExpr, tryStmt] ?? e)
+    usualTries :: (Has Fill sig m, Data a) => [a -> MaybeT m a]
+    -- usualTries = [tryMatch, tryLExpr, tryStmt] -- XXX JB
+    usualTries = [tryLExpr, tryStmt]
 
-    -- We use MaybeT since it has the MonadFail instance we want, as opposed to
-    -- the other handlers for 'Empty'
+    -- We keep track of any local binds, to prevent the user from using them in
+    -- situations where they would be evacuated to a place where they're not in
+    -- scope
+    tryMatch :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
+    tryMatch = try \(e@Match{ m_pats
+                            , m_grhss = GRHSs{ grhssGRHSs = map unLoc -> grhss
+                                             , grhssLocalBinds = localBinds
+                                             }
+                            } :: Match GhcPs LExpr) -> do
+      -- We use the Writer to collect local bindings, and the State to keep
+      -- track of the bindings that have been introduced in patterns to the
+      -- left of the one we're currently looking at. Example:
+      --   \a (Just [b, (+ b) -> d]) (foldr a b -> c) | Just f <- b, f == 24
+      -- the view pattern on `c` has access to the variables to the left of it. The same applies to `d`.
+      -- `f == 24` additionally has access to variables defined in the guard to its left.
+      -- pvars <- liftMaybeT $ foldMapA evacPat pats
+      -- IMPORTANT: initialize the state with the current reader value
+      pure e
+
+      where
+        -- evacuate !s in pattern and collect all the names it binds
+        evacPats :: forall m' sig' . (Has (Fill :+: State OccSet) sig' m') => [LPat GhcPs] -> m' ([LPat GhcPs])
+        evacPats = go
+          where
+            go :: Data a' => a' -> m' a'
+            go e = do
+              currentState <- get @OccSet
+              maybe (gmapM evac e) pure =<< runMaybeT (tryEvac ((local (const currentState) .) <$> (tryPat : usualTries)) e)
+
+            tryPat :: Data a' => a' -> MaybeT m' a'
+            tryPat = try \(p :: Pat GhcPs) -> case p of
+              VarPat xv name -> tellName name $> VarPat xv name
+              AsPat xa name pat -> do
+                tellName name
+                AsPat xa name <$> traverse (liftMaybeT . go) pat
+
+              _ -> empty
+              where
+                tellName name = modify (extendOccSet ?? occName (unLoc name))
+
+                -- XXX JB
+        -- evacPat = \case
+        --   (liftA2 . liftA2) fromMaybe (gmapM evacPat)
+          -- VarPat xv name -> tellName name $> VarPat xv name
+          -- LazyPat xl pat -> LazyPat xl <$> traverse evacPat pat
+          -- AsPat xa name pat  -> do
+          --   tellName name
+          --   AsPat xa name <$> traverse evacPat pat
+          -- ParPat xp _ pat _ -> evacLPat pat
+          -- BangPat _ pat -> evacLPat pat
+          -- ListPat xl pats -> traverse evacLPat pats >>= \(unzip -> pats') -> undefined -- XXX JB actually vars from first pattern are avail in second and so on
+          -- TuplePat _ pats _ -> traverse evacLPat pats >>= \(unzip -> pats') -> undefined
+          -- SumPat _ pat _ _ -> evacLPat pat
+          -- ConPat _ _ (hsConPatArgs -> pats) -> foldMapA evacLPat pats
+          -- ViewPat xv expr (L l pat) -> do
+          --   (pat', vars) <- evacPat pat
+          --   expr' <- local (<> vars) $ evac expr
+          --   pure (ViewPat xv expr' (L l pat'), vars)
+
+          -- _ -> undefined
+
+          -- where evacLPat = evacPat . unLoc
+          --       tellName = tell . unitOccSet . occName . unLoc
+
     tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-    tryLExpr e = do
-      Refl <- hoistMaybe (eqT @a @LExpr)
+    tryLExpr = try \e@(L l _) -> do
       ExprLoc loc expr <- pure e
-      let L l _ = e
       case expr of
         -- Replace holes resulting from `!`
         -- If no corresponding expression can be found in the Offer, we assume
         -- that it was a hole put there by the user and leave it unmodified
-        HsUnboundVar _ _ -> do
-          yoink loc >>= maybe (pure e) \lexpr -> do
-            lexpr' <- evac lexpr
-            name <- bangVar lexpr' loc
-            tellOne $ name :<- lexpr'
-            evac . L l $ HsVar noExtField (noLocA name)
+        HsUnboundVar _ _ -> yoink loc >>= maybe (pure e) \lexpr -> do
+          lexpr' <- evac lexpr
+          name <- bangVar lexpr' loc
+          tellOne $ name :<- lexpr'
+          evac . L l $ HsVar noExtField (noLocA name)
+        -- HsVar _ (occName . unLoc -> name) -> do
+        --   whenM (elemOccSet name <$> ask) $ tellPsError PsErrUnpackDataCon l.locA -- XXX JB use proper error message
+        --   pure e
+        -- XXX JB must reset the LocalVars here with local
         HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> traverse addStmts stmts
 
-        -- the remaining cases are only added to aid in performance, to avoid
-        -- recursing over their constructor arguments, which don't contain
-        -- expressions anyway
-        HsVar{} -> pure e
-        HsRecSel{} -> pure e
-        HsOverLabel{} -> pure e
-        HsIPVar{} -> pure e
-        HsOverLit{} -> pure e
-        HsLit{} -> pure e
-        HsProjection{} -> pure e
+        -- TODO: check whether manually writing more cases here (espcially ones
+        -- without expression where you can just return `pure e` improves
+        -- performance)
 
         _ -> empty
 
     tryStmt :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-    tryStmt e = do
-      Refl <- hoistMaybe (eqT @a @(ExprStmt GhcPs))
+    tryStmt = try \e -> do
       case e of
         RecStmt{recS_stmts} -> do
           recS_stmts' <- traverse addStmts recS_stmts
@@ -184,7 +250,7 @@ type PsErrors = Writer (Messages PsError)
 type HoleFills = Offer Loc LExpr
 -- | We keep track of variables that are bound in lambdas, cases, etc., since
 -- these are variables that will not be accessible in the surrounding
--- 'do'-block, and must therefore not be used
+-- 'do'-block, and must therefore not be used.
 type LocalVars = Reader OccSet
 
 type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques :+: LocalVars
