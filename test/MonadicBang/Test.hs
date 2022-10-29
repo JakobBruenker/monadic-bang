@@ -13,6 +13,8 @@ module Main (main) where
 import GHC.Stack
 import Data.Char
 
+-- TODO: More tests with complex expressions inside the !
+
 -- getA, getB, getC :: IO String
 -- getA = pure "a"
 -- getB = pure "b"
@@ -44,6 +46,10 @@ main = do
 --       error $ "Expected " <> show expected <> ", but got " <> show actual
 
 type Test = HasCallStack => IO ()
+
+-- XXX JB for testing expected failures
+-- runDefaultGhc :: MonadIO m => Ghc a -> m a
+-- runDefaultGhc action = liftIO $ runGhc (Just GHC.Paths.libdir) (setSessionDynFlags initialDynFlags >> action)
 
 -- withoutDo :: Test
 -- withoutDo = do assertEq "a" !getA
@@ -129,5 +135,5 @@ shouldFail :: Test
 shouldFail = !do
   x <- getA
   let y = let x = print 24 in !x
-  let f (a, b) = !a + !b
+  let f (a, b) = !(f a) + !(let c = c + b in c + b)
   pure y

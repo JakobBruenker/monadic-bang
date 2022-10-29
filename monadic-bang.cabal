@@ -103,7 +103,7 @@ test-suite monadic-bang-test
     hs-source-dirs:   test
 
     -- The entrypoint to the test suite.
-    main-is:          MonadicBangTest.hs
+    main-is:          MonadicBang/Test.hs
 
     -- Test dependencies.
     build-depends:    base >=4.16.0.0 && <5,

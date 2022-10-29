@@ -58,6 +58,36 @@ data Loc = MkLoc {line :: Int, col :: Int}
 type Expr = HsExpr GhcPs
 type LExpr = LHsExpr GhcPs
 
+-- | To keep track of which local variables in scope may be used
+--
+-- If local variables are defined within the same do block as a !, but outside
+-- of a !, they must not be used, since their desugaring would make them escape
+-- their scope.
+data InScope = MkInScope {valid :: OccSet , invalid :: OccSet}
+
+instance Semigroup InScope where
+  a <> b = MkInScope{valid = a.valid <> b.valid, invalid = a.invalid <> b.invalid}
+
+instance Monoid InScope where
+  mempty = noneInScope
+
+noneInScope :: InScope
+noneInScope = MkInScope emptyOccSet emptyOccSet
+
+addValid :: OccName -> InScope -> InScope
+addValid name inScope = inScope{valid = extendOccSet inScope.valid name}
+
+addValids :: OccSet -> InScope -> InScope
+addValids names inScope = inScope{valid = inScope.valid <> names}
+
+invalidateVars :: InScope -> InScope
+invalidateVars inScope = MkInScope{valid = emptyOccSet, invalid = inScope.valid <> inScope.invalid}
+
+isInvalid :: Has (Reader InScope) sig m => OccName -> m Bool
+isInvalid name = do
+  inScope <- ask @InScope
+  pure $ name `elemOccSet` inScope.invalid
+
 -- | Decrement column by one to get the location of a !
 bangLoc :: Loc -> Loc
 bangLoc loc = loc{col = loc.col - 1}
@@ -83,7 +113,7 @@ replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedR
 replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
-  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader emptyOccSet . fmap snd . runWriter @OccSet $ fillHoles fills mod'
+  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . fmap snd . runWriter @OccSet $ fillHoles fills mod'
   log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
@@ -162,16 +192,16 @@ fillHoles fillers ast = do
     tryHsBindLR = try \(bind :: HsBindLR GhcPs GhcPs) -> case bind of
       FunBind{fun_id = occName . unLoc -> name, fun_matches = matches} -> do
         tellLocalVar name
-        fun_matches <-  local (extendOccSet ?? name) $ handleMatchGroup matches
+        fun_matches <-  local (addValid name) $ handleMatchGroup matches
         pure bind{fun_matches}
       PatBind{pat_lhs = lhs, pat_rhs = rhs} -> do
-        (binds, pat_lhs) <- ask @OccSet >>= flip runState (traverse evacPats lhs)
+        (binds, pat_lhs) <- ask @InScope >>= flip runState (traverse evacPats lhs)
         pat_rhs <- local (<> binds) $ handleGRHSs rhs
         pure bind{pat_lhs, pat_rhs}
       -- All VarBinds are introduced by the type checker, but we might as well handle them
       VarBind{var_id = occName -> name, var_rhs = expr} -> do
         tellLocalVar name
-        var_rhs <- local (extendOccSet ?? name) $ evac expr
+        var_rhs <- local (addValid name) $ evac expr
         pure bind{var_rhs}
       -- Pattern synonyms can never appear inside of do blocks, so we don't have
       -- to handle them specially
@@ -183,8 +213,8 @@ fillHoles fillers ast = do
     -- XXX JB "try", and make instances for these guys
     handleGRHSs :: forall sig m . Has Fill sig m => GRHSs GhcPs LExpr -> m (GRHSs GhcPs LExpr)
     handleGRHSs grhss = do
-      patVars <- ask @OccSet
-      grhssLocalBinds <- local (const patVars) $ evac grhss.grhssLocalBinds
+      patVars <- ask @InScope
+      grhssLocalBinds <- local (<> patVars) $ evac grhss.grhssLocalBinds
       grhssGRHSs <- evalState patVars $ evacPats grhss.grhssGRHSs
       pure grhss{grhssGRHSs, grhssLocalBinds}
 
@@ -204,24 +234,24 @@ fillHoles fillers ast = do
           --
           -- the view pattern on `c` has access to the variables to the left of it. The same applies to `d`.
           -- `f == 24` additionally has access to variables defined in the guard to its left.
-          (patVars, m_pats) <- ask @OccSet >>= runState ?? evacPats match.m_pats
-          traceM $ "match patVars" ++ showPprUnsafe patVars
+          (patVars, m_pats) <- ask @InScope >>= runState ?? evacPats match.m_pats
+          traceM $ "match patVars" ++ showPprUnsafe patVars.valid ++ ", " ++ showPprUnsafe patVars.invalid
           traceM $ "\"" ++ showPprUnsafe match.m_pats
           traceM $ "\"" ++ showPprUnsafe match
-          m_grhss <- local (const patVars) $ handleGRHSs match.m_grhss
+          m_grhss <- local (<> patVars) $ handleGRHSs match.m_grhss
           pure match{m_pats, m_grhss}
 
     -- evacuate !s in pattern and collect all the names it binds
-    evacPats :: forall a m sig . (Has (Fill :+: State OccSet) sig m, Data a) => a -> m a
+    evacPats :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> m a
     evacPats e = do
-      currentState <- get @OccSet
-      maybe (gmapM evacPats e) pure =<< runMaybeT (tryEvac ((local (const currentState) .) <$> (tryPat : usualTries)) e)
+      currentState <- get @InScope
+      maybe (gmapM evacPats e) pure =<< runMaybeT (tryEvac ((local (<> currentState) .) <$> (tryPat : usualTries)) e)
 
     -- XXX JB I think we should replace this by tryRdrName -- XXX JB HOWEVER: binds in do statements should be ignored. Sooo maybe it's safer to go this route after all.
     -- XXX JB HOWEVER no. 2: I think we don't actually need to worry about binds in do statements - since we special case HsDo.
     -- XXX JB the one thing we'd need to special case as well though is `a <- a`, since the bind here isn't visible
     -- XXX JB ...overall I still feel like I'm more comfortable special casing HsBindLR and patterns...
-    tryPat :: forall a m sig . (Has (Fill :+: State OccSet) sig m, Data a) => a -> MaybeT m a
+    tryPat :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> MaybeT m a
     tryPat = try \(p :: Pat GhcPs) -> trace ("matching pattern " ++ showPprUnsafe p) case p of
       VarPat xv name -> trace ("handling pattern" ++ showPprUnsafe name) $ tellName name $> VarPat xv name
       AsPat xa name pat -> do
@@ -233,7 +263,7 @@ fillHoles fillers ast = do
         tellName (occName . unLoc -> name) = do
           traceM ("XXX TELLING " ++ showPprUnsafe name) 
           tellLocalVar name
-          modify $ extendOccSet ?? name
+          modify $ addValid name
 
     tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
     tryLExpr = try \e@(L l _) -> do
@@ -243,18 +273,26 @@ fillHoles fillers ast = do
         -- If no corresponding expression can be found in the Offer, we assume
         -- that it was a hole put there by the user and leave it unmodified
         HsUnboundVar _ _ -> yoink loc >>= maybe (pure e) \lexpr -> do
-          lexpr' <- evac lexpr
+          -- all existing valid local variables now become invalid, since using
+          -- them would make them escape their scope
+          lexpr' <- local invalidateVars $ evac lexpr
           name <- bangVar lexpr' loc
           tellOne $ name :<- lexpr'
-          evac . L l $ HsVar noExtField (noLocA name)
+          -- XXX JB pretty sure we don't need the evac here
+          -- evac . L l $ HsVar noExtField (noLocA name)
+          pure . L l $ HsVar noExtField (noLocA name)
         HsVar _ (occName . unLoc -> name) -> do
-          traceM . (("CHECKING HsVar: " ++ showPprUnsafe name ++ " against ") ++ ) . showPprUnsafe =<< ask @OccSet
-          whenM (elemOccSet name <$> ask) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA -- XXX JB use proper error message
+          traceM . (("CHECKING " ++ showPprUnsafe name ++ " (valid, invalid) ") ++) . (\is -> showPprUnsafe is.valid ++ ", " ++ showPprUnsafe is.invalid) =<< ask @InScope
+          whenM (asks @InScope $ isInvalid name) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA -- XXX JB use proper error message
           pure e
-        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const emptyOccSet) (traverse addStmts stmts)
+        -- In HsDo, we can discard all in-scope variables in the context, since
+        -- any !-desugaring we encounter cannot escape outside of this
+        -- 'do'-block, and thus also not outside of the scope of those
+        -- variables
+        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const noneInScope) (traverse addStmts stmts)
         HsLet xl letTok binds inTok ex -> do
           (boundVars, binds') <- runWriter @OccSet $ evac binds
-          fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (<> boundVars) $ evac ex
+          fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (addValids boundVars) $ evac ex
 
         -- TODO: check whether manually writing more cases here (espcially ones
         -- without expression where you can just return `pure e` improves
@@ -293,9 +331,9 @@ type HoleFills = Offer Loc LExpr
 -- 'do'-block, and must therefore not be used.
 -- The Reader is used to find out what local variables are in scope, the Writer
 -- is used to inform callers which local variables have been bound.
-type LocalVars = Reader OccSet :+: Writer OccSet
+type LocalVars = Reader InScope :+: Writer OccSet
 
--- TODO Do we really need Writer OccSet, Reader OccSet, *and* State OccSet?
+-- TODO Do we really need Writer OccSet, Reader InScope, *and* State InScope?
 type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques :+: LocalVars
 
 data BindStmt = RdrName :<- LExpr

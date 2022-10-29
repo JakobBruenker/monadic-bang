@@ -27,7 +27,7 @@ customError = PsUnknownMessage . \cases
   (ErrOutOfScopeVariable name) -> DiagnosticMessage
     { diagMessage = mkDecorated [text "The variable " <> ppr name <> text " cannot be used here, since its desugaring would escape its scope"]
     , diagReason = ErrorWithoutFlag
-    , diagHints = [UnknownHint $ text "Maybe you meant to open another 'do'-block after " <> ppr name <> text " has been bound?"]
+    , diagHints = [UnknownHint $ text "Maybe you meant to open a new 'do'-block after " <> ppr name <> text " has been bound?"]
     }
 
 tellPsError :: Has PsErrors sig m => PsError -> SrcSpan -> m ()
