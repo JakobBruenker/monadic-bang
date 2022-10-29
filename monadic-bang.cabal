@@ -105,8 +105,17 @@ test-suite monadic-bang-test
     -- The entrypoint to the test suite.
     main-is:          MonadicBang/Test.hs
 
-    -- Test dependencies.
-    build-depends:    base >=4.16.0.0 && <5,
-                      monadic-bang,
+    other-modules:    MonadicBang.Test.Utils.RunGhcParser
+                      MonadicBang.Test.Utils
+                      MonadicBang.Test.ShouldPass
+                      MonadicBang.Test.ShouldFail
 
-    ghc-options:      -Wall
+    -- Test dependencies.
+    build-depends:    base >=4.17.0.0 && <5,
+                      ghc >= 9.3,
+                      ghc-boot >= 9.3,
+                      ghc-paths ^>= 0.1.0.12,
+                      transformers ^>= 0.5.6,
+                      exceptions ^>= 0.10,
+
+    ghc-options:      -Wall -Wcompat -plugin-package=monadic-bang

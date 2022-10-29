@@ -113,6 +113,7 @@ replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedR
 replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
+  -- TODO since the output of the Writer is not used, we should add a carrier providing evalWriter, which just ignores `tell`.
   (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . fmap snd . runWriter @OccSet $ fillHoles fills mod'
   log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
@@ -134,8 +135,7 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
 -- source span can be found in the given list.
 fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars) sig m) => Map Loc LExpr -> a -> m a
 fillHoles fillers ast = do
-  -- TODO since the output of the Writer is not used, we should add a carrier providing runNullWriter, which just ignores `tell`.
-  (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter . fmap snd . runWriter @OccSet $ evac ast
+  (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
   MkOptions{preserveErrors} <- ask
   for_ binds \bind -> tellPsError (psError (bindStmtExpr bind) preserveErrors) (bangSpan $ bindStmtSpan bind)
   pure if null remainingErrs
@@ -146,7 +146,7 @@ fillHoles fillers ast = do
       Preserve      -> PsErrBangPatWithoutSpace expr
       Don'tPreserve -> customError ErrBangOutsideOfDo
 
-        -- XXX JB seems like we probably only need one evac, not two
+    -- XXX JB seems like we probably only need one evac, not two... not sure though, actually
     evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
     -- This recurses over all nodes in the AST, except for nodes for which
     -- one of the `try` functions returns `Just <something>`.
@@ -225,7 +225,6 @@ fillHoles fillers ast = do
       where
         handleMatch :: Match GhcPs LExpr -> m (Match GhcPs LExpr)
         handleMatch match = do
-          traceM "doing match"
           -- We use the State to keep track of the bindings that have been
           -- introduced in patterns to the left of the one we're currently looking
           -- at. Example:
@@ -235,9 +234,6 @@ fillHoles fillers ast = do
           -- the view pattern on `c` has access to the variables to the left of it. The same applies to `d`.
           -- `f == 24` additionally has access to variables defined in the guard to its left.
           (patVars, m_pats) <- ask @InScope >>= runState ?? evacPats match.m_pats
-          traceM $ "match patVars" ++ showPprUnsafe patVars.valid ++ ", " ++ showPprUnsafe patVars.invalid
-          traceM $ "\"" ++ showPprUnsafe match.m_pats
-          traceM $ "\"" ++ showPprUnsafe match
           m_grhss <- local (<> patVars) $ handleGRHSs match.m_grhss
           pure match{m_pats, m_grhss}
 
@@ -252,8 +248,8 @@ fillHoles fillers ast = do
     -- XXX JB the one thing we'd need to special case as well though is `a <- a`, since the bind here isn't visible
     -- XXX JB ...overall I still feel like I'm more comfortable special casing HsBindLR and patterns...
     tryPat :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> MaybeT m a
-    tryPat = try \(p :: Pat GhcPs) -> trace ("matching pattern " ++ showPprUnsafe p) case p of
-      VarPat xv name -> trace ("handling pattern" ++ showPprUnsafe name) $ tellName name $> VarPat xv name
+    tryPat = try \(p :: Pat GhcPs) -> case p of
+      VarPat xv name -> tellName name $> VarPat xv name
       AsPat xa name pat -> do
         tellName name
         AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
@@ -261,7 +257,6 @@ fillHoles fillers ast = do
       _ -> empty
       where
         tellName (occName . unLoc -> name) = do
-          traceM ("XXX TELLING " ++ showPprUnsafe name) 
           tellLocalVar name
           modify $ addValid name
 
@@ -282,7 +277,6 @@ fillHoles fillers ast = do
           -- evac . L l $ HsVar noExtField (noLocA name)
           pure . L l $ HsVar noExtField (noLocA name)
         HsVar _ (occName . unLoc -> name) -> do
-          traceM . (("CHECKING " ++ showPprUnsafe name ++ " (valid, invalid) ") ++) . (\is -> showPprUnsafe is.valid ++ ", " ++ showPprUnsafe is.invalid) =<< ask @InScope
           whenM (asks @InScope $ isInvalid name) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA -- XXX JB use proper error message
           pure e
         -- In HsDo, we can discard all in-scope variables in the context, since
