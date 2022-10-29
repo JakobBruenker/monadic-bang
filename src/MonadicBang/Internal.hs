@@ -46,6 +46,7 @@ import MonadicBang.Effect.Offer
 import MonadicBang.Effect.Uniques
 import MonadicBang.Options
 import MonadicBang.Utils
+import MonadicBang.Error
 
 -- TODO: do we want to add Reader DynFlags with showPpr instead of using showPprUnsafe?
 
@@ -113,11 +114,7 @@ fillHoles fillers ast = do
   where
     psError expr = \cases
       Preserve      -> PsErrBangPatWithoutSpace expr
-      Don'tPreserve -> PsUnknownMessage $ DiagnosticMessage
-        { diagMessage = mkDecorated [text "Monadic ! outside of a 'do'-block is not allowed"]
-        , diagReason = ErrorWithoutFlag
-        , diagHints = [SuggestMissingDo]
-        }
+      Don'tPreserve -> customError ErrBangOutsideOfDo
 
         -- XXX JB seems like we probably only need one evac, not two
     evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
@@ -252,7 +249,7 @@ fillHoles fillers ast = do
           evac . L l $ HsVar noExtField (noLocA name)
         HsVar _ (occName . unLoc -> name) -> do
           traceM . (("CHECKING HsVar: " ++ showPprUnsafe name ++ " against ") ++ ) . showPprUnsafe =<< ask @OccSet
-          whenM (elemOccSet name <$> ask) $ tellPsError PsErrUnpackDataCon l.locA -- XXX JB use proper error message
+          whenM (elemOccSet name <$> ask) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA -- XXX JB use proper error message
           pure e
         HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const emptyOccSet) (traverse addStmts stmts)
         HsLet xl letTok binds inTok ex -> do
@@ -290,7 +287,6 @@ fillHoles fillers ast = do
       (fromDList -> stmts, lstmt') <- runWriter $ evac lstmt
       pure $ map fromBindStmt stmts ++ [lstmt']
 
-type PsErrors = Writer (Messages PsError)
 type HoleFills = Offer Loc LExpr
 -- | We keep track of variables that are bound in lambdas, cases, etc., since
 -- these are variables that will not be accessible in the surrounding
@@ -330,9 +326,6 @@ locVar str spn loc = do
   let occ = mkVarOcc $ printf "<%s:%d:%d>" str loc.line loc.col
   unique <- freshUnique
   pure . nameRdrName $ mkInternalName unique occ spn
-
-tellPsError :: Has PsErrors sig m => PsError -> SrcSpan -> m ()
-tellPsError err srcSpan = tell . singleMessage $ MsgEnvelope srcSpan neverQualify err SevError
 
 tellOne :: Has (Writer (DList w)) sig m => w -> m ()
 tellOne x = tell $ Endo (x:)
