@@ -128,5 +128,5 @@ type Test = HasCallStack => IO ()
 shouldFail :: Test
 shouldFail = do
   let y = let x = print 24 in !x
-  let f (a, b) = !a + !b
+  -- let f (a, b) = !a + !b
   pure y
