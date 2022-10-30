@@ -1,4 +1,5 @@
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE BlockArguments #-}
 
 {-# OPTIONS -fplugin=MonadicBang #-}
 
@@ -12,22 +13,26 @@ import Control.Monad.Trans.Except
 import Data.Foldable
 
 import GHC
+import GHC.Driver.Plugins
+import GHC.Driver.Env.Types
 import GHC.Driver.Config.Finder
 import GHC.Driver.Session
 import GHC.LanguageExtensions qualified as LangExt
-import GHC.Data.EnumSet as ES
+import GHC.Data.EnumSet qualified as ES
 import GHC.Data.StringBuffer
 import GHC.Settings.IO
 import GHC.Types.SourceFile
-import GHC.Parser.Errors.Types
+import GHC.Types.SourceError
 import GHC.Unit.Types
 import GHC.Unit.Finder
 import GHC.Utils.Fingerprint
 
 import GHC.Paths qualified
 
+import MonadicBang qualified
+
 -- | Parses a module
-parseGhc :: MonadIO m => String -> ExceptT String m ParsedModule
+parseGhc :: MonadIO m => String -> m (Either SourceError ParsedModule)
 parseGhc src = do
   let dflags = !initialDynFlags
       modNameStr = "MonadicBang.Test.Tmp"
@@ -49,21 +54,26 @@ parseGhc src = do
         , ms_hspp_opts = dflags
         , ms_hspp_buf = Just $ stringToStringBuffer src
         }
-  -- runDefaultGhc dflags $ catch (parseModule modSummary) (\(e :: SomeException) -> error $ "caught something! " ++ show e)
-  runDefaultGhc dflags $ parseModule modSummary
-  where
+        -- XXX JB use handleSourceError
+  runDefaultGhc dflags do
+    fmap Right (parseModule modSummary) `catch` \(e :: SourceError) -> pure (Left e)
 
 runDefaultGhc :: MonadIO m => DynFlags -> Ghc a -> m a
-runDefaultGhc dflags action = do liftIO $ runGhc (Just GHC.Paths.libdir) (setSessionDynFlags dflags >> action)
+runDefaultGhc dflags action = liftIO do
+  runGhc (Just GHC.Paths.libdir) (do setSessionDynFlags dflags >> addPlugin >> action)
+  where
+    addPlugin = do
+      let session = !getSession
+          plugins = hsc_plugins session
+      setSession (session{hsc_plugins = plugins{staticPlugins = StaticPlugin (PluginWithArgs MonadicBang.plugin []) : staticPlugins plugins}})
 
 initialDynFlags :: MonadIO m => m DynFlags
 initialDynFlags = do
   dflags <- withExts
   pure $ dflags{generalFlags = ES.insert Opt_ImplicitImportQualified $ generalFlags dflags}
   where
-    withExts = do pure $ foldl' xopt_set (defaultDynFlags !settings' llvmConfig'){pluginModNames} $ exts
+    withExts = do pure $ foldl' xopt_set (defaultDynFlags !settings' llvmConfig') $ exts
     exts = [LangExt.LambdaCase]
-    pluginModNames = map mkModuleName ["MonadicBang", "hmm"]
 
 settings' :: MonadIO m => m Settings
 settings' = either (error . showSettingsError) id <$> runExceptT (initSettings GHC.Paths.libdir)

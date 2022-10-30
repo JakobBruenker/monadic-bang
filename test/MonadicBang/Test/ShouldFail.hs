@@ -9,15 +9,16 @@ import GHC
 
 import Debug.Trace
 import GHC.Utils.Outputable
+import GHC.Parser.Errors.Types
 
 shouldFail :: Test
 shouldFail = combined
 
 combined :: Test
 combined = do
-  _test <- runExceptT $ parseGhc "do pure !a !b"
-  traceM "XXXXXXXXXXXXXXXXXX"
-  error $ either show showPprUnsafe $ pm_parsed_source <$> _test
+  -- XXX JB should we add "main = " automatically? Might have to think about indentation, i.e. add 7 spaces to everything
+  -- _test <- assertParseFailWith [] "!main = !do let a = b in pure !a !b"
+  _test <- assertParseFailWith [PsWarnTab 2] "main = do let a = b in pure a b"
   pure ()
 -- combined = runGhcParser "\
 -- \!do\n\

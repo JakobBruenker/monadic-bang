@@ -9,6 +9,10 @@ import MonadicBang.Internal
 
 -- TODO mention in documentation how shadowing is an issue
 
+-- TODO mention in docs how `do put 4; put 5 >> print !get` will print 4, not 5? whereas `do put 4; put 5; print !get` *will* produce 5
+
+-- TODO metion in docs how `<-` becomes redundant if you want it to
+
 plugin :: Plugin
 plugin = defaultPlugin
   { parsedResultAction = replaceBangs
