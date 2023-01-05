@@ -7,7 +7,6 @@
 -- files, and check what (if any) errors it produced
 module MonadicBang.Test.Utils.RunGhcParser where
 
-import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Except
 import Data.Foldable
@@ -54,9 +53,8 @@ parseGhc src = do
         , ms_hspp_opts = dflags
         , ms_hspp_buf = Just $ stringToStringBuffer src
         }
-        -- XXX JB use handleSourceError
-  runDefaultGhc dflags do
-    fmap Right (parseModule modSummary) `catch` \(e :: SourceError) -> pure (Left e)
+  runDefaultGhc dflags . handleSourceError (pure . Left) $
+    Right <$> parseModule modSummary
 
 runDefaultGhc :: MonadIO m => DynFlags -> Ghc a -> m a
 runDefaultGhc dflags action = liftIO do
