@@ -38,7 +38,7 @@ assertFailWith expected = \case
     ppr result
   Left err -> when (not sameErrors) do
     error . showSDocUnsafe $
-      text "    Expected failure with" $$
+      text "\n    Expected failure with" $$
       diagnosticsSDoc expected $$
       text "    but execution failed with these errors instead:" $$
       diagnosticsSDoc errMsgs
@@ -50,7 +50,6 @@ assertFailWith expected = \case
       sameErrors = maybe False (((==) `on` map (unDecorated . diagnosticMessage)) expected) $ traverse toPsMessage errMsgs
   where
     diagnosticsSDoc diags = vcat (map (vcat . unDecorated . diagnosticMessage) diags)
-
 
 assertParseFailWith :: HasCallStack => [PsMessage] -> String -> IO ()
 assertParseFailWith expected source = withFrozenCallStack do

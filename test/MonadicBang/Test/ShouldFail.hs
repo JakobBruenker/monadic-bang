@@ -17,8 +17,7 @@ shouldFail = combined
 combined :: Test
 combined = do
   -- XXX JB should we add "main = " automatically? Might have to think about indentation, i.e. add 7 spaces to everything
-  -- _test <- assertParseFailWith [] "!main = !do let a = b in pure !a !b"
-  _test <- assertParseFailWith [PsWarnTab 2] "main = do let a = b in pure a b"
+  _test <- assertParseFailWith [] "!main = !do let a = b in pure !a !b"
   pure ()
 -- combined = runGhcParser "\
 -- \!do\n\
