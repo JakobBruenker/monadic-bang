@@ -20,7 +20,7 @@ import Control.Carrier.State.Strict
 import Control.Carrier.Throw.Either
 import Control.Carrier.Lift
 import Control.Effect.Sum hiding (L)
-import Control.Exception hiding (try)
+import Control.Exception hiding (handle, try, Handler)
 import Data.Data
 import Data.Foldable
 import Data.Functor
@@ -47,6 +47,7 @@ import MonadicBang.Utils
 import MonadicBang.Error
 
 -- TODO: do we want to add Reader DynFlags with showPpr instead of using showPprUnsafe?
+-- XXX JB look at all the TODOs
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
@@ -129,6 +130,36 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
             -> Right (loc, lexpr)
             | otherwise -> Left err
 
+-- | Types that always need to be handled by the plugin
+class Handle a where
+  handle :: forall sig m . Has Fill sig m => Handler m (a GhcPs LExpr)
+
+instance Handle GRHSs where
+  handle grhss = do
+    patVars <- ask @InScope
+    grhssLocalBinds <- local (<> patVars) $ evac grhss.grhssLocalBinds
+    grhssGRHSs <- evalState patVars $ evacPats grhss.grhssGRHSs
+    pure grhss{grhssGRHSs, grhssLocalBinds}
+
+instance Handle MatchGroup where
+  handle mg = do
+    mg_alts <- (traverse . traverse . traverse) handle mg.mg_alts
+    pure mg{mg_alts}
+
+instance Handle Match where
+  handle match = do
+    -- We use the State to keep track of the bindings that have been
+    -- introduced in patterns to the left of the one we're currently looking
+    -- at. Example:
+    --
+    -- > \a (Just [b, (+ b) -> d]) (foldr a b -> c) | Just f <- b, f == 24
+    --
+    -- the view pattern on `c` has access to the variables to the left of it. The same applies to `d`.
+    -- `f == 24` additionally has access to variables defined in the guard to its left.
+    (patVars, m_pats) <- ask @InScope >>= runState ?? evacPats match.m_pats
+    m_grhss <- local (<> patVars) $ handle match.m_grhss
+    pure match{m_pats, m_grhss}
+
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
 fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars) sig m) => Map Loc LExpr -> a -> m a
@@ -144,178 +175,142 @@ fillHoles fillers ast = do
       Preserve      -> PsErrBangPatWithoutSpace expr
       Don'tPreserve -> customError ErrBangOutsideOfDo
 
-    -- XXX JB seems like we probably only need one evac, not two... not sure though, actually
-    evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
-    -- This recurses over all nodes in the AST, except for nodes for which
-    -- one of the `try` functions returns `Just <something>`.
-    evac e = maybe (gmapM evac e) pure =<< runMaybeT (tryEvac usualTries e)
+-- XXX JB seems like we probably only need one evac, not two... not sure though, actually
+evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
+-- This recurses over all nodes in the AST, except for nodes for which
+-- one of the `try` functions returns `Just <something>`.
+evac e = maybe (gmapM evac e) pure =<< runMaybeT (tryEvac usualTries e)
 
-    tryEvac :: Monad m => [a -> MaybeT m a] -> a -> MaybeT m a
-    tryEvac tries = asum . (tries ??)
+tryEvac :: Monad m => [a -> MaybeT m a] -> a -> MaybeT m a
+tryEvac tries = asum . (tries ??)
 
-    -- TODO: Via benchmarking, find out whether it makes sense to `try` more
-    -- datatypes here (e.g. `trySrcSpan`) that would always remain unmodified
-    -- anyway due to not containing expressions, and thus don't need to be
-    -- recursed over (in that case you could probably have a function like
-    -- `ignore @SrcSpan`, which would simplify things)
-    -- TODO sort _roughly_ by how often each try will succeed (micro-optimization)
-    usualTries :: (Has Fill sig m, Data a) => [a -> MaybeT m a]
-    -- XXX JB maybe they should all be handlers, and then we map try over them here (not actually map because that would require a het list)
-    usualTries = [tryHsBindLR, try handleMatchGroup, tryLExpr, tryStmtLR]
+-- TODO: Via benchmarking, find out whether it makes sense to `try` more
+-- datatypes here (e.g. `trySrcSpan`) that would always remain unmodified
+-- anyway due to not containing expressions, and thus don't need to be
+-- recursed over (in that case you could probably have a function like
+-- `ignore @SrcSpan`, which would simplify things)
+-- TODO sort _roughly_ by how often each try will succeed (micro-optimization)
+usualTries :: (Has Fill sig m, Data a) => [a -> MaybeT m a]
+-- XXX JB maybe they should all be handlers, and then we map try over them here (not actually map because that would require a het list)
+usualTries = [tryHsBindLR, try (handle @MatchGroup), tryLExpr, tryStmtLR]
 
-    -- | We keep track of any local binds, to prevent the user from using them
-    -- with ! in situations where they would be evacuated to a place where
-    -- they're not in scope
-    --
-    -- The plugin would still work without this, but might accept programs that
-    -- shouldn't be accepted, with unexpected semantics. E.g:
-    --
-    -- > do let s = pure "outer"
-    -- >    let s = pure "inner" in putStrLn !s
-    --
-    -- You might expect this to print `inner`, but it would actually print
-    -- `outer`, since it would be desugared to
-    --
-    -- > do let s = pure "outer"
-    -- >    <!s> <- s
-    -- >    let s = pure "inner" in print <!s>
-    --
-    -- With this function, the plugin will instead throw an error saying that
-    -- `s` cannot be used here.
-    --
-    -- If the first `s` weren't defined, the user would, without this function,
-    -- get an error saying that `s` is not in scope, at the call site. Here,
-    -- we instead throw a more informative error.
-    tryHsBindLR :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-    tryHsBindLR = try \(bind :: HsBindLR GhcPs GhcPs) -> case bind of
-      FunBind{fun_id = occName . unLoc -> name, fun_matches = matches} -> do
-        tellLocalVar name
-        fun_matches <-  local (addValid name) $ handleMatchGroup matches
-        pure bind{fun_matches}
-      PatBind{pat_lhs = lhs, pat_rhs = rhs} -> do
-        (binds, pat_lhs) <- ask @InScope >>= flip runState (traverse evacPats lhs)
-        pat_rhs <- local (<> binds) $ handleGRHSs rhs
-        pure bind{pat_lhs, pat_rhs}
-      -- All VarBinds are introduced by the type checker, but we might as well handle them
-      VarBind{var_id = occName -> name, var_rhs = expr} -> do
-        tellLocalVar name
-        var_rhs <- local (addValid name) $ evac expr
-        pure bind{var_rhs}
-      -- Pattern synonyms can never appear inside of do blocks, so we don't have
-      -- to handle them specially
-      PatSynBind{} -> empty
-    
-    -- XXX JB should these be called evac instead of handle? idk though handler isn't bad
-    -- XXX JB could have `type Handler m a = a -> m a`
-    -- XXX JB we could even make a class Handle that provides "handle" and
-    -- XXX JB "try", and make instances for these guys
-    handleGRHSs :: forall sig m . Has Fill sig m => GRHSs GhcPs LExpr -> m (GRHSs GhcPs LExpr)
-    handleGRHSs grhss = do
-      patVars <- ask @InScope
-      grhssLocalBinds <- local (<> patVars) $ evac grhss.grhssLocalBinds
-      grhssGRHSs <- evalState patVars $ evacPats grhss.grhssGRHSs
-      pure grhss{grhssGRHSs, grhssLocalBinds}
+-- | We keep track of any local binds, to prevent the user from using them
+-- with ! in situations where they would be evacuated to a place where
+-- they're not in scope
+--
+-- The plugin would still work without this, but might accept programs that
+-- shouldn't be accepted, with unexpected semantics. E.g:
+--
+-- > do let s = pure "outer"
+-- >    let s = pure "inner" in putStrLn !s
+--
+-- You might expect this to print `inner`, but it would actually print
+-- `outer`, since it would be desugared to
+--
+-- > do let s = pure "outer"
+-- >    <!s> <- s
+-- >    let s = pure "inner" in print <!s>
+--
+-- With this function, the plugin will instead throw an error saying that
+-- `s` cannot be used here.
+--
+-- If the first `s` weren't defined, the user would, without this function,
+-- get an error saying that `s` is not in scope, at the call site. Here,
+-- we instead throw a more informative error.
+tryHsBindLR :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
+tryHsBindLR = try \(bind :: HsBindLR GhcPs GhcPs) -> case bind of
+  FunBind{fun_id = occName . unLoc -> name, fun_matches = matches} -> do
+    tellLocalVar name
+    fun_matches <-  local (addValid name) $ handle matches
+    pure bind{fun_matches}
+  PatBind{pat_lhs = lhs, pat_rhs = rhs} -> do
+    (binds, pat_lhs) <- ask @InScope >>= flip runState (traverse evacPats lhs)
+    pat_rhs <- local (<> binds) $ handle rhs
+    pure bind{pat_lhs, pat_rhs}
+  -- All VarBinds are introduced by the type checker, but we might as well handle them
+  VarBind{var_id = occName -> name, var_rhs = expr} -> do
+    tellLocalVar name
+    var_rhs <- local (addValid name) $ evac expr
+    pure bind{var_rhs}
+  -- Pattern synonyms can never appear inside of do blocks, so we don't have
+  -- to handle them specially
+  PatSynBind{} -> empty
 
-    handleMatchGroup :: forall sig m . Has Fill sig m => MatchGroup GhcPs LExpr -> m (MatchGroup GhcPs LExpr)
-    handleMatchGroup mg = do
-      mg_alts <- (traverse . traverse . traverse) handleMatch mg.mg_alts
-      pure mg{mg_alts}
+-- evacuate !s in pattern and collect all the names it binds
+evacPats :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> m a
+evacPats e = do
+  currentState <- get @InScope
+  maybe (gmapM evacPats e) pure =<< runMaybeT (tryEvac ((local (<> currentState) .) <$> (tryPat : usualTries)) e)
+
+tryPat :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> MaybeT m a
+tryPat = try \(p :: Pat GhcPs) -> case p of
+  VarPat xv name -> tellName name $> VarPat xv name
+  AsPat xa name pat -> do
+    tellName name
+    AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
+
+  _ -> empty
+  where
+    tellName (occName . unLoc -> name) = do
+      tellLocalVar name
+      modify $ addValid name
+
+tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
+tryLExpr = try \e@(L l _) -> do
+  ExprLoc loc expr <- pure e
+  case expr of
+    -- Replace holes resulting from `!`
+    -- If no corresponding expression can be found in the Offer, we assume
+    -- that it was a hole put there by the user and leave it unmodified
+    HsUnboundVar _ _ -> yoink loc >>= maybe (pure e) \lexpr -> do
+      -- all existing valid local variables now become invalid, since using
+      -- them would make them escape their scope
+      lexpr' <- local invalidateVars $ evac lexpr
+      name <- bangVar lexpr' loc
+      tellOne $ name :<- lexpr'
+      pure . L l $ HsVar noExtField (noLocA name)
+    HsVar _ (occName . unLoc -> name) -> do
+      whenM (asks @InScope $ isInvalid name) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA
+      pure e
+    -- In HsDo, we can discard all in-scope variables in the context, since
+    -- any !-desugaring we encounter cannot escape outside of this
+    -- 'do'-block, and thus also not outside of the scope of those
+    -- variables
+    HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const noneInScope) (traverse addStmts stmts)
+    HsLet xl letTok binds inTok ex -> do
+      (boundVars, binds') <- runWriter @OccSet $ evac binds
+      fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (addValids boundVars) $ evac ex
+
+    -- TODO: check whether manually writing more cases here (espcially ones
+    -- without expression where you can just return `pure e` improves
+    -- performance)
+
+    _ -> empty
+
+tryStmtLR :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
+tryStmtLR = try \e -> do
+  case e of
+    RecStmt{recS_stmts} -> do
+      recS_stmts' <- traverse addStmts recS_stmts
+      pure e{recS_stmts = recS_stmts'}
+    ParStmt xp stmtBlocks zipper bind -> do
+      stmtsBlocks' <- traverse addParStmts stmtBlocks
+      pure $ ParStmt xp stmtsBlocks' zipper bind
       where
-        handleMatch :: Match GhcPs LExpr -> m (Match GhcPs LExpr)
-        handleMatch match = do
-          -- We use the State to keep track of the bindings that have been
-          -- introduced in patterns to the left of the one we're currently looking
-          -- at. Example:
-          --
-          -- > \a (Just [b, (+ b) -> d]) (foldr a b -> c) | Just f <- b, f == 24
-          --
-          -- the view pattern on `c` has access to the variables to the left of it. The same applies to `d`.
-          -- `f == 24` additionally has access to variables defined in the guard to its left.
-          (patVars, m_pats) <- ask @InScope >>= runState ?? evacPats match.m_pats
-          m_grhss <- local (<> patVars) $ handleGRHSs match.m_grhss
-          pure match{m_pats, m_grhss}
+        addParStmts :: ParStmtBlock GhcPs GhcPs -> MaybeT m (ParStmtBlock GhcPs GhcPs)
+        addParStmts (ParStmtBlock xb stmts vars ret) = do
+          stmts' <- addStmts stmts
+          pure $ ParStmtBlock xb stmts' vars ret
 
-    -- evacuate !s in pattern and collect all the names it binds
-    evacPats :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> m a
-    evacPats e = do
-      currentState <- get @InScope
-      maybe (gmapM evacPats e) pure =<< runMaybeT (tryEvac ((local (<> currentState) .) <$> (tryPat : usualTries)) e)
+    _ -> empty
 
-    -- XXX JB I think we should replace this by tryRdrName -- XXX JB HOWEVER: binds in do statements should be ignored. Sooo maybe it's safer to go this route after all.
-    -- XXX JB HOWEVER no. 2: I think we don't actually need to worry about binds in do statements - since we special case HsDo.
-    -- XXX JB the one thing we'd need to special case as well though is `a <- a`, since the bind here isn't visible
-    -- XXX JB ...overall I still feel like I'm more comfortable special casing HsBindLR and patterns...
-    tryPat :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> MaybeT m a
-    tryPat = try \(p :: Pat GhcPs) -> case p of
-      VarPat xv name -> tellName name $> VarPat xv name
-      AsPat xa name pat -> do
-        tellName name
-        AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
-
-      _ -> empty
-      where
-        tellName (occName . unLoc -> name) = do
-          tellLocalVar name
-          modify $ addValid name
-
-    tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-    tryLExpr = try \e@(L l _) -> do
-      ExprLoc loc expr <- pure e
-      case expr of
-        -- Replace holes resulting from `!`
-        -- If no corresponding expression can be found in the Offer, we assume
-        -- that it was a hole put there by the user and leave it unmodified
-        HsUnboundVar _ _ -> yoink loc >>= maybe (pure e) \lexpr -> do
-          -- all existing valid local variables now become invalid, since using
-          -- them would make them escape their scope
-          lexpr' <- local invalidateVars $ evac lexpr
-          name <- bangVar lexpr' loc
-          tellOne $ name :<- lexpr'
-          -- XXX JB pretty sure we don't need the evac here
-          -- evac . L l $ HsVar noExtField (noLocA name)
-          pure . L l $ HsVar noExtField (noLocA name)
-        HsVar _ (occName . unLoc -> name) -> do
-          whenM (asks @InScope $ isInvalid name) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA -- XXX JB use proper error message
-          pure e
-        -- In HsDo, we can discard all in-scope variables in the context, since
-        -- any !-desugaring we encounter cannot escape outside of this
-        -- 'do'-block, and thus also not outside of the scope of those
-        -- variables
-        HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const noneInScope) (traverse addStmts stmts)
-        HsLet xl letTok binds inTok ex -> do
-          (boundVars, binds') <- runWriter @OccSet $ evac binds
-          fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (addValids boundVars) $ evac ex
-
-        -- TODO: check whether manually writing more cases here (espcially ones
-        -- without expression where you can just return `pure e` improves
-        -- performance)
-
-        _ -> empty
-
-    tryStmtLR :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-    tryStmtLR = try \e -> do
-      case e of
-        RecStmt{recS_stmts} -> do
-          recS_stmts' <- traverse addStmts recS_stmts
-          pure e{recS_stmts = recS_stmts'}
-        ParStmt xp stmtBlocks zipper bind -> do
-          stmtsBlocks' <- traverse addParStmts stmtBlocks
-          pure $ ParStmt xp stmtsBlocks' zipper bind
-          where
-            addParStmts :: ParStmtBlock GhcPs GhcPs -> MaybeT m (ParStmtBlock GhcPs GhcPs)
-            addParStmts (ParStmtBlock xb stmts vars ret) = do
-              stmts' <- addStmts stmts
-              pure $ ParStmtBlock xb stmts' vars ret
-
-        _ -> empty
-
-    -- | Find all !s in the given statements and combine the resulting bind
-    -- statements into lists, with the original statements being the last one
-    -- in each list - then concatenate these lists
-    addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques :+: LocalVars) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
-    addStmts = concatMapM \lstmt -> do
-      (fromDList -> stmts, lstmt') <- runWriter $ evac lstmt
-      pure $ map fromBindStmt stmts ++ [lstmt']
+-- | Find all !s in the given statements and combine the resulting bind
+-- statements into lists, with the original statements being the last one
+-- in each list - then concatenate these lists
+addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques :+: LocalVars) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+addStmts = concatMapM \lstmt -> do
+  (fromDList -> stmts, lstmt') <- runWriter $ evac lstmt
+  pure $ map fromBindStmt stmts ++ [lstmt']
 
 type HoleFills = Offer Loc LExpr
 -- | We keep track of variables that are bound in lambdas, cases, etc., since

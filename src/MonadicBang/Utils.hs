@@ -9,6 +9,8 @@ import Data.Typeable
 
 type DList a = Endo [a]
 
+type Handler m a = a -> m a
+
 {-# INLINE fromDList #-}
 fromDList :: DList a -> [a]
 fromDList = appEndo ?? []

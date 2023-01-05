@@ -1,10 +1,6 @@
 {-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE LexicalNegation #-}
 {-# LANGUAGE MonadComprehensions #-}
-{-# LANGUAGE ParallelListComp #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE MultiWayIf #-}
 
 module Main (main) where
 
