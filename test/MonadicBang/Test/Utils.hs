@@ -1,6 +1,5 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ViewPatterns #-}
 
 module MonadicBang.Test.Utils where
 
@@ -36,7 +35,7 @@ assertFailWith expected = \case
     diagnosticsSDoc expected $$
     text "    but execution succeeded with this result:" $$
     ppr result
-  Left err -> when (not sameErrors) do
+  Left err -> unless sameErrors do
     error . showSDocUnsafe $
       text "\n    Expected failure with" $$
       diagnosticsSDoc expected $$
