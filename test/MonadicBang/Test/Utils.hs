@@ -6,14 +6,11 @@ module MonadicBang.Test.Utils where
 import Control.Monad
 import Data.Foldable
 import Data.Function
-import Data.List (partition)
-import Data.Maybe
 
 import GHC.Stack
 
 import GHC
 import GHC.Driver.Errors.Types
-import GHC.Parser.Errors.Types
 import GHC.Types.Error
 import GHC.Types.SourceError
 import GHC.Utils.Outputable hiding ((<>))
