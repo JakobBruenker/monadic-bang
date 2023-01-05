@@ -59,8 +59,8 @@ type LExpr = LHsExpr GhcPs
 -- | To keep track of which local variables in scope may be used
 --
 -- If local variables are defined within the same do block as a !, but outside
--- of a !, they must not be used, since their desugaring would make them escape
--- their scope.
+-- of a !, they must not be used within that !, since their desugaring would
+-- make them escape their scope.
 data InScope = MkInScope {valid :: OccSet , invalid :: OccSet}
 
 instance Semigroup InScope where

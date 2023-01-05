@@ -35,9 +35,15 @@ combined = assertParseFailWith (mkErrors [S "x", S "f", S "a", S "b", S "b", O, 
 \"
 
 foo :: Test
-foo = assertParseFailWith (mkErrors [S "a", O, O]) "\
+foo = assertParseFailWith (mkErrors [S "a", S "x", S "y", S "b", S "b1", S "a2", O, O, O]) "\
 \main = !getA\n\
 \g = do let a = x in !a\n\
 \       pure ()\n\
 \f = !getB\n\
+\h = \\x -> !x\n\
+\i = do \\y -> !y\n\
+\j = let z = z in do \\_ -> !z -- no error\n\
+\k = case () of a -> do case () of b -> !(a + b)\n\
+\l = let c1 = c1 in do let b1 = b1 in !(let c1 = c1 in a1 + b1 + c1)\n\
+\m = do !(let a2 = a2 in !a2)\n\
 \"
