@@ -53,9 +53,6 @@ import MonadicBang.Error
 
 import Data.Kind
 
--- TODO: do we want to add Reader DynFlags with showPpr instead of using showPprUnsafe?
--- XXX JB look at all the TODOs
-
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
 data Loc = MkLoc {line :: Int, col :: Int}
@@ -120,7 +117,8 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
   -- TODO since the output of the Writer is not used, we should add a carrier providing evalWriter, which just ignores `tell`.
-  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . fmap snd . runWriter @OccSet $ fillHoles fills mod'
+  dflags <- getDynFlags
+  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . fmap snd . runWriter @OccSet . runReader dflags $ fillHoles fills mod'
   log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
@@ -329,14 +327,15 @@ instance Handle StmtLR where
 
 -- | Replace holes in an AST whenever an expression with the corresponding
 -- source span can be found in the given list.
-fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars) sig m) => Map Loc LExpr -> Handler m a
+fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars :+: Reader DynFlags) sig m) => Map Loc LExpr -> Handler m a
 fillHoles fillers ast = do
   (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
   MkOptions{preserveErrors} <- ask
   for_ binds \bind -> tellPsError (psError (bindStmtExpr bind) preserveErrors) (bangSpan $ bindStmtSpan bind)
+  dflags <- ask
   pure if null remainingErrs
     then ast'
-    else panic $ "Found extraneous bangs:" ++ unlines (showPprUnsafe <$> toList remainingErrs)
+    else panic $ "Found extraneous bangs:" ++ unlines (showPpr dflags <$> toList remainingErrs)
   where
     psError expr = \cases
       Preserve      -> PsErrBangPatWithoutSpace expr
@@ -368,7 +367,7 @@ evacPats e = do
 -- | Find all !s in the given statements and combine the resulting bind
 -- statements into lists, with the original statements being the last one
 -- in each list - then concatenate these lists
-addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques :+: LocalVars) sig m => Handler m [ExprLStmt GhcPs]
+addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques :+: LocalVars :+: Reader DynFlags) sig m => Handler m [ExprLStmt GhcPs]
 addStmts = concatMapM \lstmt -> do
   (fromDList -> stmts, lstmt') <- runWriter $ evac lstmt
   pure $ map fromBindStmt stmts ++ [lstmt']
@@ -381,8 +380,7 @@ type HoleFills = Offer Loc LExpr
 -- is used to inform callers which local variables have been bound.
 type LocalVars = Reader InScope :+: Writer OccSet
 
--- TODO Do we really need Writer OccSet, Reader InScope, *and* State InScope?
-type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques :+: LocalVars
+type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques :+: LocalVars :+: Reader DynFlags
 
 data BindStmt = RdrName :<- LExpr
 
@@ -398,14 +396,18 @@ fromBindStmt = noLocA . \cases
     where
       varPat = noLocA . VarPat noExtField $ noLocA var
 
--- Use the !'d expression if it's short enough, or else just <!expr>
--- We don't need to worry about shadowing other !'d expressions, since we add
--- the line and column numbers
-bangVar :: Has Uniques sig m => LExpr -> Loc -> m RdrName
-bangVar (L spn expr) = (locVar . ('!':)) ?? spn.locA $ case lines (showPprUnsafe expr) of
-  (str:rest) | null rest && length str < 20 -> str
-             | otherwise                    -> take 16 str ++ "..."
-  _                                         -> "<empty expression>"
+-- | Use the !'d expression if it's short enough, or else abbreviate with `...`
+-- We don't need to worry about shadowing other !'d expressions:
+-- - For the user, we add line and column numbers to the name
+-- - For the compiler, we use a unique instead of the name
+bangVar :: Has (Uniques :+: Reader DynFlags) sig m => LExpr -> Loc -> m RdrName
+bangVar (L spn expr) loc = do
+  dflags <- ask
+  let name = '!' : case lines (showPpr dflags expr) of
+        (str:rest) | null rest && length str < 20 -> str
+                   | otherwise                    -> take 16 str ++ "..."
+        _                                         -> "<empty expression>"
+  locVar name spn.locA loc
 
 locVar :: Has Uniques sig m => String -> SrcSpan -> Loc -> m RdrName
 locVar str spn loc = do
