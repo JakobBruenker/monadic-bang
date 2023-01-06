@@ -38,3 +38,4 @@ instance Algebra sig m => Algebra (Uniques :+: sig) (UniquesC m) where
   alg hdl sig ctx = case sig of
     L FreshUnique -> UniquesC . state $ fmap (ctx $>) . swap . takeUniqFromSupply
     R other -> UniquesC (alg ((.getUniquesState) . hdl) (R other) ctx)
+  {-# INLINE alg #-} 

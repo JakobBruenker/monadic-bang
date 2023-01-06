@@ -52,6 +52,7 @@ import MonadicBang.Utils
 import MonadicBang.Error
 
 import Data.Kind
+import MonadicBang.Effect.Writer.Discard
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
@@ -118,7 +119,7 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   traceShow cmdLineOpts $ pure ()
   -- TODO since the output of the Writer is not used, we should add a carrier providing evalWriter, which just ignores `tell`.
   dflags <- getDynFlags
-  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . fmap snd . runWriter @OccSet . runReader dflags $ fillHoles fills mod'
+  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . evalWriter @OccSet . runReader dflags $ fillHoles fills mod'
   log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where

@@ -55,6 +55,7 @@ library
                       MonadicBang.Internal
                       MonadicBang.Effect.Offer
                       MonadicBang.Effect.Uniques
+                      MonadicBang.Effect.Writer.Discard
                       MonadicBang.Options
                       MonadicBang.Utils
                       MonadicBang.Error

@@ -32,3 +32,4 @@ instance (Algebra sig m, Ord k) => Algebra (Offer k v :+: sig) (OfferC k v m) wh
       put remaining
       pure (mv <$ ctx)
     R other -> OfferC (alg ((.getOfferState) . hdl) (R other) ctx)
+  {-# INLINE alg #-}
