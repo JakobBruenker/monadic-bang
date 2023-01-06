@@ -32,6 +32,7 @@ shouldPass = do
   insideWhere
   insideCase
   usingDoBlockVar
+  largeExpr
 
 getA, getB, getC :: IO String
 getA = pure "a"
@@ -122,3 +123,7 @@ usingDoBlockVar :: Test
 usingDoBlockVar = do
   let a = !getA
   assertEq "a" !(pure a)
+
+largeExpr :: Test
+largeExpr = do
+  assertEq () !(assertEq () !(assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]))

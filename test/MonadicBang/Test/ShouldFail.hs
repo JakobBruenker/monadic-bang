@@ -12,7 +12,8 @@ import GHC.Parser.Errors.Types
 shouldFail :: Test
 shouldFail = do
   combined
-  foo
+  various
+  letStmt
 
 data ErrorData
   = S String -- ^ Out of scope variable
@@ -34,8 +35,8 @@ combined = assertParseFailWith (mkErrors [S "x", S "f", S "a", S "b", S "b", O, 
 \  pure y)\n\
 \"
 
-foo :: Test
-foo = assertParseFailWith (mkErrors [S "a", S "x", S "y", S "b", S "b1", S "a2", O, O, O]) "\
+various :: Test
+various = assertParseFailWith (mkErrors [S "a", S "x", S "y", S "b", S "b1", S "a2", O, O, O]) "\
 \main = !getA\n\
 \g = do let a = x in !a\n\
 \       pure ()\n\
@@ -46,4 +47,11 @@ foo = assertParseFailWith (mkErrors [S "a", S "x", S "y", S "b", S "b1", S "a2",
 \k = case () of a -> do case () of b -> !(a + b)\n\
 \l = let c1 = c1 in do let b1 = b1 in !(let c1 = c1 in a1 + b1 + c1)\n\
 \m = do !(let a2 = a2 in !a2)\n\
+\"
+
+letStmt :: Test
+letStmt = assertParseFailWith (mkErrors [S "x"]) "\
+\main = do\n\
+\  let x = !x\n\
+\  pure x\n\
 \"

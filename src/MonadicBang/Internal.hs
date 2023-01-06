@@ -117,7 +117,6 @@ replaceBangs :: [CommandLineOption] -> ModSummary -> Handler Hsc ParsedResult
 replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
-  -- TODO since the output of the Writer is not used, we should add a carrier providing evalWriter, which just ignores `tell`.
   dflags <- getDynFlags
   (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . evalWriter @OccSet . runReader dflags $ fillHoles fills mod'
   log options.verbosity (ppr mod'')
@@ -288,7 +287,12 @@ instance Handle HsExpr where
         tellOne $ name :<- lexpr'
         pure . L l $ HsVar noExtField (noLocA name)
       HsVar _ (occName . unLoc -> name) -> do
-        whenM (asks @InScope $ isInvalid name) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA
+        -- TODO one nice thing is that "whenM" and such can be replaced by
+        -- "when" + ! - maybe note in the docs. But: it's important that
+        -- "whileM" cannot be replaced by "while" + !, since the latter would
+        -- only evaluate the condition once, while the former evaluates it
+        -- every time.
+        whenM (isInvalid name) do tellPsError (customError $ ErrOutOfScopeVariable name) l.locA
         pure e
       -- In HsDo, we can discard all in-scope variables in the context, since
       -- any !-desugaring we encounter cannot escape outside of this
