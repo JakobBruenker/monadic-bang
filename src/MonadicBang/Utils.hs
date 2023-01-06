@@ -5,7 +5,6 @@ module MonadicBang.Utils where
 import Control.Monad.Trans.Maybe
 import Data.Foldable
 import Data.Monoid
-import Data.Typeable
 
 type DList a = Endo [a]
 
@@ -28,14 +27,6 @@ hoistMaybe = MaybeT . pure
 dup :: a -> (a, a)
 dup a = (a, a)
 
-{-# INLINE try #-}
--- | Try to apply the given function the the given argument. If the types don't
--- match, this will be `empty`.
-try :: forall a e m . (Monad m, Typeable e, Typeable a) => (e -> MaybeT m e) -> (a -> MaybeT m a)
-try f e = do
-  Refl <- hoistMaybe $ eqT @a @e
-  f e
-
 {-# INLINE foldMapA #-}
 foldMapA :: (Traversable t, Applicative f, Monoid m) => (a -> f m) -> t a -> f m
 foldMapA f xs = fold <$> traverse f xs
@@ -43,4 +34,4 @@ foldMapA f xs = fold <$> traverse f xs
 panic :: String -> a
 panic message = error $ unlines ["MonadicBang panic:", message, "", submitReport]
   where
-    submitReport = "This is likely a bug. Please submit a bug report under https://github.com/JakobBruenker/monadic-bang/issues"
+    submitReport = "This is likely a bug. Please submit a bug report at https://github.com/JakobBruenker/monadic-bang/issues"

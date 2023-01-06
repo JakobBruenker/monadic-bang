@@ -12,7 +12,6 @@ import Control.Monad
 import Data.Bifunctor
 import Data.Bool
 import Data.List (intercalate, partition)
-import Data.Maybe
 
 import GHC
 import GHC.Plugins
@@ -29,7 +28,7 @@ parseOptions mod' cmdLineOpts = do
     verbosity <- bool Quiet DumpTransformed <$> extractOpts verboseOpts
     preserveErrors <- bool Don'tPreserve Preserve <$> extractOpts preserveErrorsOpts
     pure $ MkOptions verbosity preserveErrors
-  when (not $ null remaining) $ throw . ErrorCall $
+  unless (null remaining) . errorWithoutStackTrace $
     "Incorrect command line options for plugin MonadicBang, encountered in " ++ modName ++ modFile ++
     "\n\tOptions that were supplied (via -fplugin-opt) are: " ++ intercalate ", " (map show cmdLineOpts) ++
     "\n\tUnrecognized options: " ++ showOpts remaining ++
@@ -50,8 +49,8 @@ parseOptions mod' cmdLineOpts = do
 
     showOpts = intercalate ", " . map show
 
-    modFile = fromMaybe "" $ ((" in file " ++) . unpackFS . srcSpanFile) <$> toRealSrcSpan (getLoc mod')
-    modName = fromMaybe "an unnamed module" $ (("module " ++) . moduleNameString . unLoc) <$> (unLoc mod').hsmodName
+    modFile = maybe "" ((" in file " ++) . unpackFS . srcSpanFile) $ toRealSrcSpan (getLoc mod')
+    modName = maybe "an unnamed module" (("module " ++) . moduleNameString . unLoc) $ (unLoc mod').hsmodName
     toRealSrcSpan = \cases
       (RealSrcSpan rss _) -> Just rss
       (UnhelpfulSpan _) -> Nothing

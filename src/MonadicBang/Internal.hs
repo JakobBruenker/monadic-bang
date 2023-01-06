@@ -8,30 +8,35 @@
 {-# LANGUAGE StrictData #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module MonadicBang.Internal where
 
 import Prelude hiding (log)
 import Control.Applicative
+import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.Identity
 import Control.Carrier.Reader
 import Control.Carrier.Writer.Strict
 import Control.Carrier.State.Strict
 import Control.Carrier.Throw.Either
 import Control.Carrier.Lift
 import Control.Effect.Sum hiding (L)
-import Control.Exception hiding (handle, try, Handler)
+import Control.Exception hiding (try, handle, Handler)
 import Data.Data
 import Data.Foldable
 import Data.Functor
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.Monoid
-import GHC
+import GHC hiding (Type)
 import GHC.Data.Bag
 import GHC.Data.Maybe
 import GHC.Parser.Errors.Types
-import GHC.Plugins hiding (Expr, empty, (<>), panic, try)
+import GHC.Plugins hiding (Type, Expr, empty, (<>), panic, try)
 import GHC.Types.Error
 import GHC.Utils.Monad (concatMapM, whenM)
 import Text.Printf
@@ -46,6 +51,8 @@ import MonadicBang.Options
 import MonadicBang.Utils
 import MonadicBang.Error
 
+import Data.Kind
+
 -- TODO: do we want to add Reader DynFlags with showPpr instead of using showPprUnsafe?
 -- XXX JB look at all the TODOs
 
@@ -59,8 +66,8 @@ type LExpr = LHsExpr GhcPs
 
 -- | To keep track of which local variables in scope may be used
 --
--- If local variables are defined within the same do block as a !, but outside
--- of a !, they must not be used within that !, since their desugaring would
+-- If local variables are defined within the same statement as a !, but outside
+-- of that !, they must not be used within this !, since their desugaring would
 -- make them escape their scope.
 data InScope = MkInScope {valid :: OccSet , invalid :: OccSet}
 
@@ -108,7 +115,7 @@ pattern ExprLoc loc expr <- L (locA -> RealSrcSpan (spanToLoc -> loc) _) expr
 spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
-replaceBangs :: [CommandLineOption] -> ModSummary -> ParsedResult -> Hsc ParsedResult
+replaceBangs :: [CommandLineOption] -> ModSummary -> Handler Hsc ParsedResult
 replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
@@ -129,25 +136,60 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
         err | PsErrBangPatWithoutSpace lexpr@(ExprLoc (bangLoc -> loc) _) <- err.errMsgDiagnostic
             -> Right (loc, lexpr)
             | otherwise -> Left err
+                  
+type HandleFailure :: Bool -> (Type -> Type) -> (Type -> Type)
+type family HandleFailure canFail = t | t -> canFail where
+  HandleFailure True = MaybeT
+  HandleFailure False = IdentityT
 
--- | Types that always need to be handled by the plugin
-class Handle a where
-  handle :: forall sig m . Has Fill sig m => Handler m (a GhcPs LExpr)
+class MonadTrans t => HandlingMonadTrans t where
+  toMaybeT :: Monad m => t m a -> MaybeT m a
+
+instance HandlingMonadTrans IdentityT where
+  toMaybeT = MaybeT . fmap Just . runIdentityT 
+
+instance HandlingMonadTrans MaybeT where
+  toMaybeT = id
+
+class Typeable (AstType a) => Handle a where
+  type CanFail a :: Bool
+  type AstType a = (r :: Type) | r -> a
+  type Effects a :: (Type -> Type) -> Type -> Type
+  handle' :: forall sig m m' . m ~ HandleFailure (CanFail a) m' => Has (Effects a) sig m' => Handler m (AstType a)
+
+handle :: forall a sig m . (Handle a, CanFail a ~ False) => Has (Effects a) sig m => Handler m (AstType a)
+handle = runIdentityT . handle'
+
+try :: forall e sig m a .
+       (HandlingMonadTrans (HandleFailure (CanFail e)), Typeable a, Handle e, Monad m, Has (Effects e) sig m) =>
+       Handler (MaybeT m) a
+try x = do
+  Refl <- hoistMaybe $ eqT @a @(AstType e)
+  toMaybeT $ handle' x
 
 instance Handle GRHSs where
-  handle grhss = do
+  type CanFail GRHSs = False
+  type AstType GRHSs = GRHSs GhcPs LExpr
+  type Effects GRHSs = Fill
+  handle' grhss = do
     patVars <- ask @InScope
     grhssLocalBinds <- local (<> patVars) $ evac grhss.grhssLocalBinds
     grhssGRHSs <- evalState patVars $ evacPats grhss.grhssGRHSs
     pure grhss{grhssGRHSs, grhssLocalBinds}
 
 instance Handle MatchGroup where
-  handle mg = do
+  type CanFail MatchGroup = False
+  type AstType MatchGroup = MatchGroup GhcPs LExpr
+  type Effects MatchGroup = Fill
+  handle' mg = do
     mg_alts <- (traverse . traverse . traverse) handle mg.mg_alts
     pure mg{mg_alts}
 
 instance Handle Match where
-  handle match = do
+  type CanFail Match = False
+  type AstType Match = Match GhcPs LExpr
+  type Effects Match = Fill
+  handle' match = do
     -- We use the State to keep track of the bindings that have been
     -- introduced in patterns to the left of the one we're currently looking
     -- at. Example:
@@ -159,40 +201,6 @@ instance Handle Match where
     (patVars, m_pats) <- ask @InScope >>= runState ?? evacPats match.m_pats
     m_grhss <- local (<> patVars) $ handle match.m_grhss
     pure match{m_pats, m_grhss}
-
--- | Replace holes in an AST whenever an expression with the corresponding
--- source span can be found in the given list.
-fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars) sig m) => Map Loc LExpr -> a -> m a
-fillHoles fillers ast = do
-  (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
-  MkOptions{preserveErrors} <- ask
-  for_ binds \bind -> tellPsError (psError (bindStmtExpr bind) preserveErrors) (bangSpan $ bindStmtSpan bind)
-  pure if null remainingErrs
-    then ast'
-    else panic $ "Found extraneous bangs:" ++ unlines (showPprUnsafe <$> toList remainingErrs)
-  where
-    psError expr = \cases
-      Preserve      -> PsErrBangPatWithoutSpace expr
-      Don'tPreserve -> customError ErrBangOutsideOfDo
-
--- XXX JB seems like we probably only need one evac, not two... not sure though, actually
-evac :: forall a sig m . (Has Fill sig m, Data a) => a -> m a
--- This recurses over all nodes in the AST, except for nodes for which
--- one of the `try` functions returns `Just <something>`.
-evac e = maybe (gmapM evac e) pure =<< runMaybeT (tryEvac usualTries e)
-
-tryEvac :: Monad m => [a -> MaybeT m a] -> a -> MaybeT m a
-tryEvac tries = asum . (tries ??)
-
--- TODO: Via benchmarking, find out whether it makes sense to `try` more
--- datatypes here (e.g. `trySrcSpan`) that would always remain unmodified
--- anyway due to not containing expressions, and thus don't need to be
--- recursed over (in that case you could probably have a function like
--- `ignore @SrcSpan`, which would simplify things)
--- TODO sort _roughly_ by how often each try will succeed (micro-optimization)
-usualTries :: (Has Fill sig m, Data a) => [a -> MaybeT m a]
--- XXX JB maybe they should all be handlers, and then we map try over them here (not actually map because that would require a het list)
-usualTries = [tryHsBindLR, try (handle @MatchGroup), tryLExpr, tryStmtLR]
 
 -- | We keep track of any local binds, to prevent the user from using them
 -- with ! in situations where they would be evacuated to a place where
@@ -217,79 +225,94 @@ usualTries = [tryHsBindLR, try (handle @MatchGroup), tryLExpr, tryStmtLR]
 -- If the first `s` weren't defined, the user would, without this function,
 -- get an error saying that `s` is not in scope, at the call site. Here,
 -- we instead throw a more informative error.
-tryHsBindLR :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-tryHsBindLR = try \(bind :: HsBindLR GhcPs GhcPs) -> case bind of
-  FunBind{fun_id = occName . unLoc -> name, fun_matches = matches} -> do
-    tellLocalVar name
-    fun_matches <-  local (addValid name) $ handle matches
-    pure bind{fun_matches}
-  PatBind{pat_lhs = lhs, pat_rhs = rhs} -> do
-    (binds, pat_lhs) <- ask @InScope >>= flip runState (traverse evacPats lhs)
-    pat_rhs <- local (<> binds) $ handle rhs
-    pure bind{pat_lhs, pat_rhs}
-  -- All VarBinds are introduced by the type checker, but we might as well handle them
-  VarBind{var_id = occName -> name, var_rhs = expr} -> do
-    tellLocalVar name
-    var_rhs <- local (addValid name) $ evac expr
-    pure bind{var_rhs}
-  -- Pattern synonyms can never appear inside of do blocks, so we don't have
-  -- to handle them specially
-  PatSynBind{} -> empty
+--
+-- If only the first `s` were defined, i.e.
+--
+-- > do let s = pure "outer"
+-- >    putStrLn !s
+--
+-- it would be valid code.
 
--- evacuate !s in pattern and collect all the names it binds
-evacPats :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> m a
-evacPats e = do
-  currentState <- get @InScope
-  maybe (gmapM evacPats e) pure =<< runMaybeT (tryEvac ((local (<> currentState) .) <$> (tryPat : usualTries)) e)
-
-tryPat :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => a -> MaybeT m a
-tryPat = try \(p :: Pat GhcPs) -> case p of
-  VarPat xv name -> tellName name $> VarPat xv name
-  AsPat xa name pat -> do
-    tellName name
-    AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
-
-  _ -> empty
-  where
-    tellName (occName . unLoc -> name) = do
+instance Handle HsBindLR where
+  type CanFail HsBindLR = True
+  type AstType HsBindLR = HsBindLR GhcPs GhcPs
+  type Effects HsBindLR = Fill
+  handle' bind = case bind of
+    FunBind{fun_id = occName . unLoc -> name, fun_matches = matches} -> do
       tellLocalVar name
-      modify $ addValid name
+      fun_matches <- local (addValid name) $ handle matches
+      pure bind{fun_matches}
+    PatBind{pat_lhs = lhs, pat_rhs = rhs} -> do
+      (binds, pat_lhs) <- ask @InScope >>= flip runState (traverse evacPats lhs)
+      pat_rhs <- local (<> binds) $ handle rhs
+      pure bind{pat_lhs, pat_rhs}
+    -- All VarBinds are introduced by the type checker, but we might as well handle them
+    VarBind{var_id = occName -> name, var_rhs = expr} -> do
+      tellLocalVar name
+      var_rhs <- local (addValid name) $ evac expr
+      pure bind{var_rhs}
+    -- Pattern synonyms can never appear inside of do blocks, so we don't have
+    -- to handle them specially
+    PatSynBind{} -> empty
 
-tryLExpr :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-tryLExpr = try \e@(L l _) -> do
-  ExprLoc loc expr <- pure e
-  case expr of
-    -- Replace holes resulting from `!`
-    -- If no corresponding expression can be found in the Offer, we assume
-    -- that it was a hole put there by the user and leave it unmodified
-    HsUnboundVar _ _ -> yoink loc >>= maybe (pure e) \lexpr -> do
-      -- all existing valid local variables now become invalid, since using
-      -- them would make them escape their scope
-      lexpr' <- local invalidateVars $ evac lexpr
-      name <- bangVar lexpr' loc
-      tellOne $ name :<- lexpr'
-      pure . L l $ HsVar noExtField (noLocA name)
-    HsVar _ (occName . unLoc -> name) -> do
-      whenM (asks @InScope $ isInvalid name) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA
-      pure e
-    -- In HsDo, we can discard all in-scope variables in the context, since
-    -- any !-desugaring we encounter cannot escape outside of this
-    -- 'do'-block, and thus also not outside of the scope of those
-    -- variables
-    HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const noneInScope) (traverse addStmts stmts)
-    HsLet xl letTok binds inTok ex -> do
-      (boundVars, binds') <- runWriter @OccSet $ evac binds
-      fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (addValids boundVars) $ evac ex
-
-    -- TODO: check whether manually writing more cases here (espcially ones
-    -- without expression where you can just return `pure e` improves
-    -- performance)
+instance Handle Pat where
+  type CanFail Pat = True
+  type AstType Pat = Pat GhcPs
+  type Effects Pat = Fill :+: State InScope
+  handle' = \case
+    VarPat xv name -> tellName name $> VarPat xv name
+    AsPat xa name pat -> do
+      tellName name
+      AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
 
     _ -> empty
+    where
+      tellName (occName . unLoc -> name) = do
+        tellLocalVar name
+        modify $ addValid name
 
-tryStmtLR :: forall a sig m . (Has Fill sig m, Data a) => a -> MaybeT m a
-tryStmtLR = try \e -> do
-  case e of
+instance Handle HsExpr where
+  type CanFail HsExpr = True
+  type AstType HsExpr = GenLocated SrcSpanAnnA Expr
+  type Effects HsExpr = Fill
+  handle' e@(L l _) = do
+    ExprLoc loc expr <- pure e
+    case expr of
+      -- Replace holes resulting from `!`
+      -- If no corresponding expression can be found in the Offer, we assume
+      -- that it was a hole put there by the user and leave it unmodified
+      HsUnboundVar _ _ -> yoink loc >>= maybe (pure e) \lexpr -> do
+        -- all existing valid local variables now become invalid, since using
+        -- them would make them escape their scope
+        lexpr' <- local invalidateVars $ evac lexpr
+        name <- bangVar lexpr' loc
+        tellOne $ name :<- lexpr'
+        pure . L l $ HsVar noExtField (noLocA name)
+      HsVar _ (occName . unLoc -> name) -> do
+        whenM (asks @InScope $ isInvalid name) $ tellPsError (customError $ ErrOutOfScopeVariable name) l.locA
+        pure e
+      -- In HsDo, we can discard all in-scope variables in the context, since
+      -- any !-desugaring we encounter cannot escape outside of this
+      -- 'do'-block, and thus also not outside of the scope of those
+      -- variables
+      HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const noneInScope) (traverse addStmts stmts)
+      HsLet xl letTok binds inTok ex -> do
+        (boundVars, binds') <- runWriter @OccSet $ evac binds
+        fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (addValids boundVars) $ evac ex
+
+      -- TODO: check whether manually writing more cases here (espcially ones
+      -- without expression where you can just return `pure e` improves
+      -- performance)
+
+      _ -> empty
+
+instance Handle StmtLR where
+  type CanFail StmtLR = True
+  type AstType StmtLR = StmtLR GhcPs GhcPs LExpr
+  type Effects StmtLR = Fill
+  handle' :: forall sig m m' . (m ~ MaybeT m', Has (Effects StmtLR) sig m') => Handler m (AstType StmtLR)
+  handle' e = case e of
+
     RecStmt{recS_stmts} -> do
       recS_stmts' <- traverse addStmts recS_stmts
       pure e{recS_stmts = recS_stmts'}
@@ -297,17 +320,55 @@ tryStmtLR = try \e -> do
       stmtsBlocks' <- traverse addParStmts stmtBlocks
       pure $ ParStmt xp stmtsBlocks' zipper bind
       where
-        addParStmts :: ParStmtBlock GhcPs GhcPs -> MaybeT m (ParStmtBlock GhcPs GhcPs)
+        addParStmts :: Handler m (ParStmtBlock GhcPs GhcPs)
         addParStmts (ParStmtBlock xb stmts vars ret) = do
           stmts' <- addStmts stmts
           pure $ ParStmtBlock xb stmts' vars ret
 
     _ -> empty
 
+-- | Replace holes in an AST whenever an expression with the corresponding
+-- source span can be found in the given list.
+fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars) sig m) => Map Loc LExpr -> Handler m a
+fillHoles fillers ast = do
+  (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
+  MkOptions{preserveErrors} <- ask
+  for_ binds \bind -> tellPsError (psError (bindStmtExpr bind) preserveErrors) (bangSpan $ bindStmtSpan bind)
+  pure if null remainingErrs
+    then ast'
+    else panic $ "Found extraneous bangs:" ++ unlines (showPprUnsafe <$> toList remainingErrs)
+  where
+    psError expr = \cases
+      Preserve      -> PsErrBangPatWithoutSpace expr
+      Don'tPreserve -> customError ErrBangOutsideOfDo
+
+evac :: forall a sig m . (Has Fill sig m, Data a) => Handler m a
+-- This recurses over all nodes in the AST, except for nodes for which
+-- one of the `try` functions returns `Just <something>`.
+evac e = maybe (gmapM evac e) pure =<< runMaybeT (tryEvac usualTries e)
+
+tryEvac :: Monad m => [Handler (MaybeT m) a] -> Handler (MaybeT m) a
+tryEvac tries = asum . (tries ??)
+
+-- TODO: Via benchmarking, find out whether it makes sense to `try` more
+-- datatypes here (e.g. `trySrcSpan`) that would always remain unmodified
+-- anyway due to not containing expressions, and thus don't need to be
+-- recursed over (in that case you could probably have a function like
+-- `ignore @SrcSpan`, which would simplify things)
+-- TODO sort _roughly_ by how often each try will succeed (micro-optimization)
+usualTries :: (Has Fill sig m, Data a) => [Handler (MaybeT m) a]
+usualTries = [try @HsBindLR, try @MatchGroup, try @HsExpr, try @StmtLR]
+
+-- | evacuate !s in pattern and collect all the names it binds
+evacPats :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => Handler m a
+evacPats e = do
+  currentState <- get @InScope
+  maybe (gmapM evacPats e) pure =<< runMaybeT (tryEvac ((local (<> currentState) .) <$> (try @Pat : usualTries)) e)
+
 -- | Find all !s in the given statements and combine the resulting bind
 -- statements into lists, with the original statements being the last one
 -- in each list - then concatenate these lists
-addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques :+: LocalVars) sig m => [ExprLStmt GhcPs] -> m [ExprLStmt GhcPs]
+addStmts :: forall sig m . Has (PsErrors :+: HoleFills :+: Uniques :+: LocalVars) sig m => Handler m [ExprLStmt GhcPs]
 addStmts = concatMapM \lstmt -> do
   (fromDList -> stmts, lstmt') <- runWriter $ evac lstmt
   pure $ map fromBindStmt stmts ++ [lstmt']

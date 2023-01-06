@@ -31,6 +31,7 @@ shouldPass = do
   viewPat
   insideWhere
   insideCase
+  usingDoBlockVar
 
 getA, getB, getC :: IO String
 getA = pure "a"
@@ -116,3 +117,8 @@ multiWayIf = do
   assertEq "b" if
     | !getA == !getA -> !getB
     | otherwise      -> !getC
+
+usingDoBlockVar :: Test
+usingDoBlockVar = do
+  let a = !getA
+  assertEq "a" !(pure a)
