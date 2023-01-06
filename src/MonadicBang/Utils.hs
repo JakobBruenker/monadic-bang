@@ -8,7 +8,12 @@ import Data.Monoid
 
 type DList a = Endo [a]
 
+-- | Handle a specific AST node
 type Handler m a = a -> m a
+
+-- | Try handling an AST node, but may fail (usually because the handler is not
+-- applicable)
+type Try m a = Handler (MaybeT m) a
 
 {-# INLINE fromDList #-}
 fromDList :: DList a -> [a]

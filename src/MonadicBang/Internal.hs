@@ -160,7 +160,7 @@ handle = runIdentityT . handle'
 
 try :: forall e sig m a .
        (HandlingMonadTrans (HandleFailure (CanFail e)), Typeable a, Handle e, Monad m, Has (Effects e) sig m) =>
-       Handler (MaybeT m) a
+       Try m a
 try x = do
   Refl <- hoistMaybe $ eqT @a @(AstType e)
   toMaybeT $ handle' x
@@ -303,10 +303,6 @@ instance Handle HsExpr where
         (boundVars, binds') <- runWriter @OccSet $ evac binds
         fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (addValids boundVars) $ evac ex
 
-      -- TODO: check whether manually writing more cases here (espcially ones
-      -- without expression where you can just return `pure e` improves
-      -- performance)
-
       _ -> empty
 
 instance Handle StmtLR where
@@ -340,7 +336,7 @@ fillHoles fillers ast = do
   dflags <- ask
   pure if null remainingErrs
     then ast'
-    else panic $ "Found extraneous bangs:" ++ unlines (showPpr dflags <$> toList remainingErrs)
+    else panic $ unlines $ "Found extraneous bangs:" : (showPpr dflags <$> toList remainingErrs)
   where
     psError expr = \cases
       Preserve      -> PsErrBangPatWithoutSpace expr
@@ -351,17 +347,21 @@ evac :: forall a sig m . (Has Fill sig m, Data a) => Handler m a
 -- one of the `try` functions returns `Just <something>`.
 evac e = maybe (gmapM evac e) pure =<< runMaybeT (tryEvac usualTries e)
 
-tryEvac :: Monad m => [Handler (MaybeT m) a] -> Handler (MaybeT m) a
+tryEvac :: Monad m => [Try m a] -> Try m a
 tryEvac tries = asum . (tries ??)
 
--- TODO: Via benchmarking, find out whether it makes sense to `try` more
--- datatypes here (e.g. `trySrcSpan`) that would always remain unmodified
--- anyway due to not containing expressions, and thus don't need to be
--- recursed over (in that case you could probably have a function like
--- `ignore @SrcSpan`, which would simplify things)
--- TODO sort _roughly_ by how often each try will succeed (micro-optimization)
-usualTries :: (Has Fill sig m, Data a) => [Handler (MaybeT m) a]
-usualTries = [try @HsBindLR, try @MatchGroup, try @HsExpr, try @StmtLR]
+usualTries :: (Has Fill sig m, Data a) => [Try m a]
+usualTries =
+  [ try @HsExpr, try @HsBindLR, try @MatchGroup, try @StmtLR
+  , ignore @RdrName, ignore @OccName, ignore @RealSrcSpan, ignore @EpAnnComments
+  ]
+
+-- As a minor performance optimization, we don't recurse over the AST if the node
+-- is a type that we know will never contain an expression
+ignore :: forall (e :: Type) m a . (Monad m, Typeable a, Typeable e) => Try m a
+ignore e = do
+  Refl <- hoistMaybe $ eqT @e @a
+  pure e
 
 -- | evacuate !s in pattern and collect all the names it binds
 evacPats :: forall a m sig . (Has (Fill :+: State InScope) sig m, Data a) => Handler m a

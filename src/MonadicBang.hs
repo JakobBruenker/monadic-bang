@@ -5,6 +5,8 @@ import MonadicBang.Internal
 
 -- TODO: Write user manual as haddock comment
 
+-- TODO: check whether you need to add anything to the cabal file (e.g. issue page)
+
 -- TODO: mention in the documentation how unfortunately you get a parse error for each exclamation mark if you get a fatal parse error
 
 -- TODO mention in documentation how shadowing is an issue -- update: I don't think that's a thing anymore with State?
