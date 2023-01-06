@@ -107,8 +107,8 @@ insideCase :: Test
 insideCase = do
   assertEq "b"
     case !getA of
-      (!(pure (++ "_")) -> "d") -> c ++ s123
-        where c = !getC
+      (!(pure (++ "_")) -> "d") -> c "abc" ++ s123
+        where c a = !getC ++ a
               s123 = do pure !"123"
       "c" -> "d"
       _a -> "b"
