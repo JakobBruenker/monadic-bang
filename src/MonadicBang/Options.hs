@@ -28,7 +28,7 @@ parseOptions mod' cmdLineOpts = do
     verbosity <- bool Quiet DumpTransformed <$> extractOpts verboseOpts
     preserveErrors <- bool Don'tPreserve Preserve <$> extractOpts preserveErrorsOpts
     pure $ MkOptions verbosity preserveErrors
-  unless (null remaining) . errorWithoutStackTrace $
+  unless (null remaining) . throwError . ErrorCall $
     "Incorrect command line options for plugin MonadicBang, encountered in " ++ modName ++ modFile ++
     "\n\tOptions that were supplied (via -fplugin-opt) are: " ++ intercalate ", " (map show cmdLineOpts) ++
     "\n\tUnrecognized options: " ++ showOpts remaining ++

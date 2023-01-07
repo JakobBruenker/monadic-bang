@@ -283,7 +283,7 @@ but `a` is not in scope in the second line.
 
 ### Where it can be used
 
-This is actually fairly straightforward: It can be used in any expression that is somewhere inside a `do`-block. In particular, this includes e.g. `where`-blocks in `case`-expressions:
+This is actually fairly straightforward: It can be used in any expression that is somewhere inside a `do`-block. In particular, this includes for example `where`-blocks in `case`-expressions:
 
 ```haskell
 main = do
@@ -293,7 +293,7 @@ main = do
     "greeting" -> "hello there!"
 ```
 
-as well as in view patterns
+and view patterns
 
 ```haskell
 do (extract !getSettings -> contents) <- readArchive

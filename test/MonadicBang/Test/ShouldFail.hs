@@ -14,6 +14,7 @@ shouldFail = do
   combined
   various
   letStmt
+  letInLet
 
 data ErrorData
   = S String -- ^ Out of scope variable
@@ -54,4 +55,10 @@ letStmt = assertParseFailWith (mkErrors [S "x"]) "\
 \main = do\n\
 \  let x = !x\n\
 \  pure x\n\
+\"
+
+letInLet :: Test
+letInLet = assertParseFailWith (mkErrors [S "y", S "x"]) "\
+\main = do\n\
+\  let x = x in let y = y in !y + !x\n\
 \"
