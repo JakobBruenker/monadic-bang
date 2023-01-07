@@ -197,6 +197,8 @@ This would be equivalent to
 [ x + b | a <- [800, 900], x <- [60, 70, a], b <- [1, 2, 3]]
 ```
 
+The reason `b <- ...` at the end here instead of the beginning is that everything that appears to the left of the `|` in a list comprehension is essentially comparable to the last statement of a `do`-block (+ `pure`).
+
 ### Get Rid of `<-`
 
 In principle, every instance of `pattern <- action` in a `do`-block could be replaced by `let pattern = !action`. Should they? That's a separate question, though it could be a viable style.
