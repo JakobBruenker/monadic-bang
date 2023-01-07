@@ -8,7 +8,7 @@ This is heavily inspired by [Idris's !-notation](https://idris2.readthedocs.io/e
 
 Let's look at a few examples where Haskell can be a bit annoying when it comes to monads - and what this plugin allows you to write instead:
 
-When you use `Reader` or `State`, you will often have to do something like this:
+When you use `Reader` or `State`, you will often have to use `<-` to bind fairly simple expressions:
 
 ```haskell
 launchMissile :: StateT Int IO ()
@@ -28,7 +28,7 @@ help = do
     " or writing us at " <> email
 ```
 
-With Monadic Bang, you can write
+With Monadic Bang, you can instead write
 ```haskell
 launchMissile :: StateT Int IO ()
 launchMissile = do
@@ -44,7 +44,7 @@ help = do
     " or writing us at " <> (!ask).contact.email
 ```
 
-With IORefs, STRefs, mutable arrays, and so on, you'll often have to write code that looks like this:
+With IORefs, STRefs, mutable arrays, and so on, you'll often have to write code that looks like this, having to use somewhat redundant variable names:
 
 ```haskell
 addIORefs :: IORef Int -> IORef Int -> IO Int
@@ -58,8 +58,7 @@ With Monadic Bang, you can write
 
 ```haskell
 addIORefs :: IORef Int -> IORef Int -> IO Int
-addIORefs a b = do
-  pure $ !(readIORef a) + !(readIORef b)
+addIORefs a b = do pure $ !(readIORef a) + !(readIORef b)
 ```
 
 Implicit parameter definitions have somewhat more limited syntax than regular definitions: You can't write something like `?foo <- action`.  
@@ -77,7 +76,7 @@ initQueues = do
   pure Dict
 ```
 
-with Monadic Bang, I could have written
+with Monadic Bang, I can write
 
 ```haskell
 initQueues = do
@@ -113,8 +112,23 @@ initialDynFlags = do
   pure $ dflags{generalFlags = addCompileFlags $ generalFlags dflags}
 ```
 
-The pattern you might have noticed here is that this plugin can make things more concise whenever you have `<-` in a `do`-block which doesn't pattern match, whose bound variable is only used ~once, and has a short right-hand side.  
-While that might sound like a lot of qualifiers, it does occur fairly often in practice.
+Or, to take some more code from this plugin's implementation
+
+```haskell
+do logger <- getLogger
+   liftIO $ logMsg logger MCInfo (UnhelpfulSpan UnhelpfulNoLocationInfo) m
+```
+Why have `logger` *and* `getLogger` when you can instead write
+
+```haskell
+do liftIO $ logMsg !getLogger MCInfo (UnhelpfulSpan UnhelpfulNoLocationInfo) m
+```
+
+The pattern you might have noticed here is that this plugin is convenient
+whenever you have a `do`-block with a `<-` that doesn't do pattern matching,
+whose bound variable is only used once, and has a short right-hand side.  While
+that might sound like a lot of qualifiers, it does occur fairly often in
+practice.
 
 ## Cute Things
 
@@ -140,10 +154,10 @@ If you have `-XApplicativeDo` enabled, this even works with `Applicative` instan
 `!` can easily be nested. E.g. you could have
 
 ```haskell
-do when !(!(readIORef a) > !(readIORef b)) $ ...
+do putStrLn !(readFile (!getArgs !! 1))
 ```
 
-For how this is desugared, see later sections.
+For how this is desugared, see [Desugaring](#desugaring)
 
 ### Using `-XQualifiedDo`
 
@@ -165,23 +179,22 @@ which would be desugared as
 ```Haskell
 main :: IO ()
 main = run Linear.do
-  <!a> <- openFile "tmp" WriteMode
-  <!b> <- hPutStrLn <!a> "foo"
-  <!c> <- move Linear.<$> hClose <!b>
-  Linear.return <!c>
+  a <- openFile "tmp" WriteMode
+  b <- hPutStrLn a "foo"
+  c <- move Linear.<$> hClose b
+  Linear.return c
 ```
 
 ### List comprehensions
 
-List comprehensions are kind of just special do blocks, so `!` can be used here, as well (and also in monad comprehensions). Example:
+List comprehensions are kind of just special `do`-blocks, so `!` can be used here, as well (and also in monad comprehensions). Example:
 
 ```haskell
 [ x + ![1, 2, 3] | x <- [60, 70, ![800, 900]] ]
 ```
-
-The result of this particular expression is
+This would be equivalent to
 ```haskell
-[61,62,63,71,72,73,801,802,803,61,62,63,71,72,73,901,902,903]
+[ x + b | a <- [800, 900], x <- [60, 70, a], b <- [1, 2, 3]]
 ```
 
 ### Get Rid of `<-`
@@ -200,31 +213,29 @@ main = do
   ...
 ```
 
-⚠️ NB: This would not work for e.g. `whileM`. In implementations of `whileM`, the condition is reevaluated after every iteration. If you wrote e.g. `while (!(readIORef i) > 0)`, it would only be evaluated once, before the first iteration.
+⚠️ NB: This would not work for e.g. `whileM`. In implementations of `whileM`, the condition is re-evaluated after every iteration. If you wrote e.g. `while (!(readIORef i) > 0)`, it would only be evaluated once, before the first iteration.
 
 ## Caveats
 
-By virtue of being a plugin, there's a few caveats that are worth mentioning.
+There are a few disadvantages to using this that are worth mentioning:
 
 - Since the plugin modifies the source code, the location info in error messages might look a bit strange, since it contains the desugared version. This shouldn't be an issue if you use HLS or another tool to highlight errors within your editor.
 - HLint currently does not work with this plugin (HLint will show you a parse error if you try to use `!`.)
 - If there are fatal parse errors in the source code, unfortunately each `!` will also be highlighted as a parse error. This is unavoidable at the moment, since the plugin can only intercept those messages if the module is otherwise successfully parsed.
 - Arguably this makes `do`-desugaring slightly more confusing - e.g., compare the following:
 
-```haskell
-do put 4
-   put 5 >> print !get
-``` 
-
-```haskell
-do put 4
-   put 5
-   print !get
-```  
-
-With the usual desugaring rules, whether you use `>>` or a new line shouldn't make a difference, but here, the first snippet will print `4`, while the second snippet will print `5`.
-
--- XXX JB more?
+  ```haskell
+  do put 4
+     put 5 >> print !get
+  ``` 
+  
+  ```haskell
+  do put 4
+     put 5
+     print !get
+  ```  
+  
+  With the usual desugaring rules, whether you use `>>` or a new line shouldn't make a difference, but here, the first snippet will print `4`, while the second snippet will print `5`.
 
 ## Details
 
@@ -252,7 +263,8 @@ x = g do
   <!a> <- a
   <!b> <- b
   <!c> <- c
-  <(!b + !c)> <- <!b> ++ <!c>
+  <!(!b ++ !c)> <- <!b> ++ <!c>
+  bar <- <!a> + <!(!b ++ !c)>
   <!d> <- d
   <!f> <- f
   baz <- case <!d> of

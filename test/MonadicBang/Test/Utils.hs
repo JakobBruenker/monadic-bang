@@ -21,7 +21,7 @@ import MonadicBang.Test.Utils.RunGhcParser
 type Test = HasCallStack => IO ()
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
--- We dont' care about seeing where the `error` call itself happens in the
+-- We don't care about seeing where the `error` call itself happens in the
 -- call stack, so we freeze it
 assertEq expected actual = when (expected /= actual) $ withFrozenCallStack do
   error $ "Expected " <> show expected <> ", but got " <> show actual
