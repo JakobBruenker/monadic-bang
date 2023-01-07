@@ -31,8 +31,8 @@ newtype UniquesC m a = UniquesC {getUniquesState :: StateC UniqSupply m a}
 runUniquesIO :: MonadIO m => Char -> UniquesC m a -> m a
 runUniquesIO mask (UniquesC s) = flip evalState s =<< liftIO (mkSplitUniqSupply mask)
 
-runUniques :: UniqSupply -> UniquesC m a -> m a
-runUniques = undefined
+runUniques :: Functor m => UniqSupply -> UniquesC m a -> m a
+runUniques uniqSupply (UniquesC s) = evalState uniqSupply s
 
 instance Algebra sig m => Algebra (Uniques :+: sig) (UniquesC m) where
   alg hdl sig ctx = case sig of

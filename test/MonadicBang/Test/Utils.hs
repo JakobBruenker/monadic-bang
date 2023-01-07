@@ -27,7 +27,7 @@ assertEq expected actual = when (expected /= actual) $ withFrozenCallStack do
 
 assertFailWith :: (HasCallStack, Outputable a) => [PsMessage] -> Either SourceError a -> IO ()
 assertFailWith expected = \case
-  Right result -> error . showSDocUnsafe $
+  Right result -> withFrozenCallStack $ error . showSDocUnsafe $
     text "\n    Expected failure with" $$
     diagnosticsSDoc expected $$
     text "    but execution succeeded with this result:" $$
