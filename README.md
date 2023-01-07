@@ -171,7 +171,7 @@ import System.IO.Resource.Linear
 
 main :: IO ()
 main = run Linear.do
-  Linear.return !(move Linear.<$> hClose !(hPutStrLn !(openFile "tmp" WriteMode) "foo"))
+  Linear.pure !(move Linear.<$> hClose !(hPutStrLn !(openFile "tmp" WriteMode) "foo"))
 ```
 
 which would be desugared as
@@ -182,7 +182,7 @@ main = run Linear.do
   a <- openFile "tmp" WriteMode
   b <- hPutStrLn a "foo"
   c <- move Linear.<$> hClose b
-  Linear.return c
+  Linear.pure c
 ```
 
 ### List comprehensions
