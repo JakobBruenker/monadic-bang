@@ -6,8 +6,6 @@ module MonadicBang (plugin) where
 import GHC.Plugins
 import MonadicBang.Internal
 
--- TODO: check whether you need to add anything to the cabal file (e.g. issue page)
-
 plugin :: Plugin
 plugin = defaultPlugin
   { parsedResultAction = replaceBangs
