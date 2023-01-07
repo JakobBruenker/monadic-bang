@@ -17,6 +17,7 @@ import GHC.Utils.Outputable hiding ((<>))
 
 import MonadicBang.Test.Utils.RunGhcParser
 
+-- TODO: This should use a Writer to collect all errors
 type Test = HasCallStack => IO ()
 
 assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()

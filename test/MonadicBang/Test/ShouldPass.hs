@@ -11,6 +11,7 @@
 module MonadicBang.Test.ShouldPass where
  
 import Data.Char
+import Control.Monad.Trans.State
 
 import MonadicBang.Test.Utils
 
@@ -33,6 +34,7 @@ shouldPass = do
   insideCase
   usingDoBlockVar
   largeExpr
+  confusing
 
 getA, getB, getC :: IO String
 getA = pure "a"
@@ -127,3 +129,13 @@ usingDoBlockVar = do
 largeExpr :: Test
 largeExpr = do
   assertEq () !(assertEq () !(assertEq "abc" ![ !getA ++ b ++ c | let b = !getB, c <- getC ]))
+
+confusing :: Test
+confusing = do
+  assertEq @Int 4 $ flip evalState 0 do
+    put 4
+    put 5 >> pure !get
+  assertEq @Int 5 $ flip evalState 0 do
+    put 4
+    put 5
+    pure !get 

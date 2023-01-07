@@ -118,7 +118,15 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
   traceShow cmdLineOpts $ pure ()
   dflags <- getDynFlags
-  (newErrors, mod'') <- runM . runUniquesIO 'p' . runWriter . runReader options . runReader noneInScope . evalWriter @OccSet . runReader dflags $ fillHoles fills mod'
+  (newErrors, mod'') <-
+    runM .
+    runUniquesIO 'p' .
+    runWriter .
+    runReader options .
+    runReader noneInScope .
+    evalWriter @OccSet .
+    runReader dflags $
+    fillHoles fills mod'
   log options.verbosity (ppr mod'')
   pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
@@ -287,11 +295,6 @@ instance Handle HsExpr where
         tellOne $ name :<- lexpr'
         pure . L l $ HsVar noExtField (noLocA name)
       HsVar _ (occName . unLoc -> name) -> do
-        -- TODO one nice thing is that "whenM" and such can be replaced by
-        -- "when" + ! - maybe note in the docs. But: it's important that
-        -- "whileM" cannot be replaced by "while" + !, since the latter would
-        -- only evaluate the condition once, while the former evaluates it
-        -- every time.
         whenM (isInvalid name) do tellPsError (customError $ ErrOutOfScopeVariable name) l.locA
         pure e
       -- In HsDo, we can discard all in-scope variables in the context, since

@@ -116,24 +116,11 @@ initialDynFlags = do
 The pattern you might have noticed here is that this plugin can make things more concise whenever you have `<-` in a `do`-block which doesn't pattern match, whose bound variable is only used ~once, and has a short right-hand side.  
 While that might sound like a lot of qualifiers, it does occur fairly often in practice.
 
-## Comparison with Idris's !-notation
+## Cute Things
 
-The main difference is that Idris will insert a `do` if there is none - e.g. this is legal in Idris:
+### Idiom Brackets Alternative
 
-```idris
-f :: IO ()
-f = putStrLn !getLine
-```
-
-but (assuming it's at top-level) wouldn't be with this plugin; you would have to write `f = do putStrLn !getLine` instead.
-
-XXX JB more differences? e.g. I think `do !eff` works here but not in Idris
-
-## Cute things
-
-### Idiom brackets alternative
-
-In some cases where idiom brackets would be ideal, `!` can be an alright alternative. For example, compare these four options:
+In some cases where idiom brackets would be ideal, `!` can be a reasonable alternative. For example, compare these four options:
 
 ```haskell
 1. liftA2 (&&) (readIORef useMetric) (readIORef useCelsius)
@@ -148,18 +135,6 @@ while `<$>` and `<*>` are probably better for prefix functions, `!` plays nicer 
 
 If you have `-XApplicativeDo` enabled, this even works with `Applicative` instances.
 
-### Qualified do
-
-`!` always have to be used inside a `do`-block, but it *can* be a qualified `do`-block. For example, if you use linear haskell, you could write
-
--- XXX JB does this actually work?
-```haskell
-import Control.Functor.Linear as Linear
-
-main :: IO ()
-main = Linear.do putStrLn !getLine
-```
-
 ### Nested `!`
 
 `!` can easily be nested. E.g. you could have
@@ -169,6 +144,32 @@ do when !(!(readIORef a) > !(readIORef b)) $ ...
 ```
 
 For how this is desugared, see later sections.
+
+### Using `-XQualifiedDo`
+
+`!` always have to be used inside a `do`-block, but it *can* be a qualified `do`-block. For example, if you use `-XLinearTypes`, you could write things like
+
+```haskell
+{-# LANGUAGE QualifiedDo, BlockArguments, OverloadedStrings #-}
+import Prelude.Linear
+import Control.Functor.Linear as Linear
+import System.IO.Resource.Linear
+
+main :: IO ()
+main = run Linear.do
+  Linear.return !(move Linear.<$> hClose !(hPutStrLn !(openFile "tmp" WriteMode) "foo"))
+```
+
+which would be desugared as
+
+```Haskell
+main :: IO ()
+main = run Linear.do
+  <!a> <- openFile "tmp" WriteMode
+  <!b> <- hPutStrLn <!a> "foo"
+  <!c> <- move Linear.<$> hClose <!b>
+  Linear.return <!c>
+```
 
 ### List comprehensions
 
@@ -183,11 +184,47 @@ The result of this particular expression is
 [61,62,63,71,72,73,801,802,803,61,62,63,71,72,73,901,902,903]
 ```
 
-### Get rid of `<-`
+### Get Rid of `<-`
 
-In principle, every instance of `pattern <- action` in a `do`-block could be replaced by `let pattern = !action`. Should they? That's a separate question.
+In principle, every instance of `pattern <- action` in a `do`-block could be replaced by `let pattern = !action`. Should they? That's a separate question, though it could be a viable style.
 
 The implicit parameter example in the first section is a valid use case of this.
+
+### Monadic Variants
+
+Oftentimes, some generic function exists, but then it turns out that a monadic variant of said function would be useful as well. For example, hoogle finds at least a dozen different packages offering `whenM`. With this plugin, you can instead write
+
+```haskell
+main = do
+  when (null !getArgs) $ print usage
+  ...
+```
+
+⚠️ NB: This would not work for e.g. `whileM`. In implementations of `whileM`, the condition is reevaluated after every iteration. If you wrote e.g. `while (!(readIORef i) > 0)`, it would only be evaluated once, before the first iteration.
+
+## Caveats
+
+By virtue of being a plugin, there's a few caveats that are worth mentioning.
+
+- Since the plugin modifies the source code, the location info in error messages might look a bit strange, since it contains the desugared version. This shouldn't be an issue if you use HLS or another tool to highlight errors within your editor.
+- HLint currently does not work with this plugin (HLint will show you a parse error if you try to use `!`.)
+- If there are fatal parse errors in the source code, unfortunately each `!` will also be highlighted as a parse error. This is unavoidable at the moment, since the plugin can only intercept those messages if the module is otherwise successfully parsed.
+- Arguably this makes `do`-desugaring slightly more confusing - e.g., compare the following:
+
+```haskell
+do put 4
+   put 5 >> print !get
+``` 
+
+```haskell
+do put 4
+   put 5
+   print !get
+```  
+
+With the usual desugaring rules, whether you use `>>` or a new line shouldn't make a difference, but here, the first snippet will print `4`, while the second snippet will print `5`.
+
+-- XXX JB more?
 
 ## Details
 
@@ -300,13 +337,17 @@ do (extract !getSettings -> contents) <- readArchive
    print contents
 ```
 
-## Caveats
--- XXX JB move before details
+## Comparison with Idris's `!`-notation
 
-By virtue of being a plugin, there's a few caveats that are worth mentioning.
+The main difference is that Idris will insert a `do` if there is none - e.g. this is legal in Idris:
 
-- Since the plugin modifies the source code, the location info in error messages might look a bit strange, since it contains the desugared version. This shouldn't be an issue if you use HLS or another tool to highlight errors within your editor.
-- HLint currently does not work with this plugin (HLint will show you a parse error if you try to use `!`.)
-- If there are fatal parse errors in the source code, unfortunately each `!` will also be highlighted as a parse error. This is unavoidable at the moment, since the plugin can only intercept those messages if the module is successfully parsed.
+```haskell
+f : IO ()
+f = putStrLn !getLine
+```
 
--- XXX JB more?
+but (assuming it's at top-level) wouldn't be with this plugin; you would have to write `f = do putStrLn !getLine` instead.
+
+Some other differences:
+- In Idris, `!`'d expressions cannot escape outside of a lambda expression (it effectively inserts a new new `do` at the beginning of the lambda body instead)
+- The same difference applies to `let` bindings that define functions
