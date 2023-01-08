@@ -1,16 +1,17 @@
 # Monadic Bang
 
-This is a GHC Parser plugin for GHC 9.4 and above, intended to make monadic code within `do`-blocks more concise and nicer to work with.
+This is a GHC Parser plugin for GHC 9.4 and above, intended to make monadic code within `do`-blocks more concise and nicer to work with. Works with HLS.
 
 This is heavily inspired by [Idris's !-notation](https://idris2.readthedocs.io/en/latest/tutorial/interfaces.html#notation), but with some [important differences](#comparison-with-idriss--notation).
 
 ## Contents
 
 1. [Motivating Examples](#motivating-examples)
-2. [Cute Things](#cute-things)
-3. [Caveats](#caveats)
-4. [Details](#details)
-5. [Comparison with Idris's `!`-notation](#comparison-with-idriss--notation)
+2. [Usage](#usage)
+3. [Cute Things](#cute-things)
+4. [Caveats](#caveats)
+5. [Details](#details)
+6. [Comparison with Idris's `!`-notation](#comparison-with-idriss--notation)
 
 ## Motivating Examples
 
@@ -137,6 +138,23 @@ whenever you have a `do`-block with a `<-` that doesn't do pattern matching,
 whose bound variable is only used once, and has a short right-hand side.  While
 that might sound like a lot of qualifiers, it does occur fairly often in
 practice.
+
+## Usage
+
+To use this plugin, assuming you use cabal, you have to add `monadic-bang` to the `build-depends` stanza in your `.cabal` file. Then you can either add `-fplugin=MonadicBang` to the `ghc-options` stanza, or add
+
+```haskell
+{-# OPTIONS -fplugin=MonadicBang #-}
+```
+
+to the top of the files you want to use it in.
+
+This should also allow HLS to pick up on the plugin, as long as you use HLS 1.9.0.0 or above.
+
+The plugin supports a couple of options, which you can provide via invocations of `-fplugin-opt=MonadicBang:<option>`. The options are:
+
+- `-ddump`: Print the altered AST
+- `-preserve-errors`: Keep parse errors about `!` outside of `do` in their original form, rather then a more relevant explanation. This is mainly useful if another plugin expects those errors.
 
 ## Cute Things
 
