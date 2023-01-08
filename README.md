@@ -390,5 +390,5 @@ f = putStrLn !getLine
 but (assuming it's at top-level) wouldn't be with this plugin; you would have to write `f = do putStrLn !getLine` instead.
 
 Some other differences:
-- In Idris, `!`'d expressions cannot escape outside of a lambda expression (it effectively inserts a new new `do` at the beginning of the lambda body instead)
+- In Idris, `!`'d expressions cannot escape outside of a lambda expression (it effectively inserts a new `do` at the beginning of the lambda body instead)
 - The same difference applies to `let` bindings that define functions
