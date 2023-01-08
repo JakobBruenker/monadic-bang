@@ -4,6 +4,14 @@ This is a GHC Parser plugin for GHC 9.4 and above, intended to make monadic code
 
 This is heavily inspired by [Idris's !-notation](https://idris2.readthedocs.io/en/latest/tutorial/interfaces.html#notation), but with some [important differences](#comparison-with-idriss--notation).
 
+## Contents
+
+1. [Motivating Examples](#motivating-examples)
+2. [Cute Things](#cute-things)
+3. [Caveats](#caveats)
+4. [Details](#details)
+5. [Comparison with Idris's `!`-notation](#comparison-with-idriss--notation)
+
 ## Motivating Examples
 
 Let's look at a few examples where Haskell can be a bit annoying when it comes to monads - and what this plugin allows you to write instead:
