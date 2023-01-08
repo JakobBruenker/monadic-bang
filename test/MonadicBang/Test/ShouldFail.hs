@@ -60,5 +60,5 @@ letStmt = assertParseFailWith (mkErrors [S "x"]) "\
 letInLet :: Test
 letInLet = assertParseFailWith (mkErrors [S "y", S "x"]) "\
 \main = do\n\
-\  let x = x in let y = y in !y + !x\n\
+\  let x _ = x in let y = y in !y + !x\n\
 \"
