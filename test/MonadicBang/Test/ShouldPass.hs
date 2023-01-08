@@ -6,7 +6,7 @@
 {-# LANGUAGE MonadComprehensions #-}
 {-# LANGUAGE NegativeLiterals #-}
 
-{-# OPTIONS -fplugin=MonadicBang -fplugin-opt=MonadicBang:-ddump #-}
+{-# OPTIONS_GHC -fplugin=MonadicBang -fplugin-opt=MonadicBang:-ddump #-}
 
 module MonadicBang.Test.ShouldPass where
  

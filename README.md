@@ -144,7 +144,7 @@ practice.
 To use this plugin, you have to add `monadic-bang` to the `build-depends` stanza in your `.cabal` file. Then you can either add `-fplugin=MonadicBang` to the `ghc-options` stanza, or add
 
 ```haskell
-{-# OPTIONS -fplugin=MonadicBang #-}
+{-# OPTIONS_GHC -fplugin=MonadicBang #-}
 ```
 
 to the top of the files you want to use it in.
@@ -250,6 +250,7 @@ There are a few disadvantages to using this that are worth mentioning:
 - Since the plugin modifies the source code, the location info in error messages might look a bit strange, since it contains the desugared version. This shouldn't be an issue if you use HLS or another tool to highlight errors within your editor.
 - HLint currently does not work with this plugin (HLint will show you a parse error if you try to use `!`.)
 - If there are fatal parse errors in the source code, unfortunately each `!` will also be highlighted as a parse error. This is unavoidable at the moment, since the plugin can only intercept those messages if the module is otherwise successfully parsed.
+- Plugins like this cannot affect GHCi
 - Arguably this makes `do`-desugaring slightly more confusing - e.g., compare the following:
 
   ```haskell
