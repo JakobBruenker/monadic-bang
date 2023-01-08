@@ -223,7 +223,7 @@ This would be equivalent to
 [ x + b | a <- [800, 900], x <- [60, 70, a], b <- [1, 2, 3]]
 ```
 
-The reason `b <- ...` at the end here instead of the beginning is that everything that appears to the left of the `|` in a list comprehension is essentially comparable to the last statement of a `do`-block (+ `pure`).
+The reason `b <- ...` is at the end here instead of the beginning is that everything that appears to the left of the `|` in a list comprehension is essentially comparable to the last statement of a `do`-block (+ `pure`).
 
 ### Get Rid of `<-`
 
