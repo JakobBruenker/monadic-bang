@@ -22,7 +22,7 @@ synopsis:           GHC plugin to desugar ! into do-notation
 -- A longer description of the package.
 description:        A plugin for GHC which takes expressions prefixed with a !
                     and effectively takes them out of their monadic context, by
-                    creating bind statements in do-block surrounding the
+                    creating bind statements in the do-block surrounding the
                     expression. Inspired by Idris's !-notation. For more
                     information, see README.md.
 

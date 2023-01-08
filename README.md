@@ -23,7 +23,7 @@ When you use `Reader` or `State`, you will often have to use `<-` to bind fairly
 launchMissile :: StateT Int IO ()
 launchMissile = do
   count <- get
-  putStrLn $ "The " <> show count <> "'th missile has been launched"
+  liftIO . putStrLn $ "The " <> show count <> "'th missile has been launched"
   modify' (+ 1)
 ```
 
@@ -41,7 +41,7 @@ With Monadic Bang, you can instead write
 ```haskell
 launchMissile :: StateT Int IO ()
 launchMissile = do
-  putStrLn $ "The " <> show !get <> "'th missile has been launched"
+  liftIO . putStrLn $ "The " <> show !get <> "'th missile has been launched"
   modify' (+ 1)
 ```
 
@@ -49,7 +49,7 @@ launchMissile = do
 help :: Reader Config String
 help = do
   pure $
-    "You can find help by going to " <> (!ask).link.manual <>
+    "You can find help by going to " <> (!ask).links.manual <>
     " or writing us at " <> (!ask).contact.email
 ```
 
