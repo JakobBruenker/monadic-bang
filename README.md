@@ -271,7 +271,7 @@ While the above information should cover most use cases, there are some details 
 
 ### Desugaring
 
-The desugaring is essentially what one would expect from reading the motivating examples bottom-to-top.
+The desugaring is essentially what one would expect from comparing the motivating examples with the versions using `!`.
 
 To illustrate with a fairly extensive example:
 
@@ -315,7 +315,7 @@ x = do when nuclearStrikeDetected $ log !launchMissiles
 y = do when nuclearStrikeDetected $ do log !launchMissiles
 ```
 
-`x` will launch the missiles regardless of whether or not a strike has been detected. But it will only log the results if in the case of detection.
+`x` will launch the missiles regardless of whether or not a strike has been detected. But it will only log the results in the case of detection.
 `y` will only launch the missiles (and log the results) if a strike has been detected.
 
 The desugaring:
@@ -337,8 +337,9 @@ The story for `case` and `if` expressions is similar, `!` in the individual bran
 
 A variable can be used inside a `!` if
 - it was bound outside the current `do`-block
-- it was bound before the statement the `!` is in
-- it is bound inside the `!`
+- or it was bound before the statement the `!` is in
+- or it is bound inside the `!`
+
 In other words, this is legal:
 ```haskell
 f x = do
@@ -360,7 +361,7 @@ but `a` is not in scope in the second line.
 
 ### Where it can be used
 
-This is actually fairly straightforward: It can be used in any expression that is somewhere inside a `do`-block. In particular, this includes for example `where`-blocks in `case`-expressions:
+It can be used in any expression that is somewhere inside a `do`-block. In particular, this includes for example `where`-blocks in `case`-expressions:
 
 ```haskell
 main = do
