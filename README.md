@@ -15,7 +15,7 @@ This is heavily inspired by [Idris's !-notation](https://idris2.readthedocs.io/e
 
 ## Motivating Examples
 
-Let's look at a few examples where Haskell can be a bit annoying when it comes to monads - and what this plugin allows you to write instead:
+Let's look at a few examples where Haskell syntax can be a bit annoying when it comes to monads - and what this plugin allows you to write instead:
 
 When you use `Reader` or `State`, you will often have to use `<-` to bind fairly simple expressions:
 
