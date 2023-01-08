@@ -23,7 +23,7 @@ When you use `Reader` or `State`, you will often have to use `<-` to bind fairly
 launchMissile :: StateT Int IO ()
 launchMissile = do
   count <- get
-  liftIO . putStrLn $ "The " <> show count <> "'th missile has been launched"
+  liftIO . putStrLn $ "Missile no. " <> show count <> " has been launched"
   modify' (+ 1)
 ```
 
@@ -41,7 +41,7 @@ With Monadic Bang, you can instead write
 ```haskell
 launchMissile :: StateT Int IO ()
 launchMissile = do
-  liftIO . putStrLn $ "The " <> show !get <> "'th missile has been launched"
+  liftIO . putStrLn $ "Missile no. " <> show !get <> " has been launched"
   modify' (+ 1)
 ```
 
@@ -53,7 +53,7 @@ help = do
     " or writing us at " <> (!ask).contact.email
 ```
 
-With IORefs, STRefs, mutable arrays, and so on, you'll often have to write code that looks like this, having to use somewhat redundant variable names:
+With `IORefs`, `STRefs`, mutable arrays, and so on, you'll often have to write code that looks like this, having to use somewhat redundant variable names:
 
 ```haskell
 addIORefs :: IORef Int -> IORef Int -> IO Int
@@ -141,7 +141,7 @@ practice.
 
 ## Usage
 
-To use this plugin, assuming you use cabal, you have to add `monadic-bang` to the `build-depends` stanza in your `.cabal` file. Then you can either add `-fplugin=MonadicBang` to the `ghc-options` stanza, or add
+To use this plugin, you have to add `monadic-bang` to the `build-depends` stanza in your `.cabal` file. Then you can either add `-fplugin=MonadicBang` to the `ghc-options` stanza, or add
 
 ```haskell
 {-# OPTIONS -fplugin=MonadicBang #-}
@@ -171,7 +171,7 @@ In some cases where idiom brackets would be ideal, `!` can be a reasonable alter
 4. do pure (!(readIORef useMetric) && !(readIORef useCelsius))
 ```
 
-while `<$>` and `<*>` are probably better for prefix functions, `!` plays nicer with infix operators.
+while `<$>` and `<*>` are probably better here for prefix functions, `!` plays nicer with infix operators.
 
 If you have `-XApplicativeDo` enabled, this even works with `Applicative` instances.
 
@@ -187,7 +187,7 @@ For how this is desugared, see [Desugaring](#desugaring)
 
 ### Using `-XQualifiedDo`
 
-`!` always have to be used inside a `do`-block, but it *can* be a qualified `do`-block. For example, if you use `-XLinearTypes`, you could write things like
+`!` always has to be used inside a `do`-block, but it *can* be a qualified `do`-block. For example, if you use `-XLinearTypes`, you could write things like
 
 ```haskell
 {-# LANGUAGE QualifiedDo, BlockArguments, OverloadedStrings #-}
@@ -213,7 +213,7 @@ main = run Linear.do
 
 ### List comprehensions
 
-List comprehensions are kind of just special `do`-blocks, so `!` can be used here, as well (and also in monad comprehensions). Example:
+List comprehensions are kind of just special `do`-blocks, so `!` can be used here as well (and also in monad comprehensions). Example:
 
 ```haskell
 [ x + ![1, 2, 3] | x <- [60, 70, ![800, 900]] ]
