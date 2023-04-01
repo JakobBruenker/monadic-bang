@@ -41,8 +41,6 @@ import GHC.Types.Error
 import GHC.Utils.Monad (concatMapM, whenM)
 import Text.Printf
 
-import Debug.Trace
-
 import GHC.Utils.Logger
 
 import MonadicBang.Effect.Offer
@@ -116,7 +114,6 @@ spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 replaceBangs :: [CommandLineOption] -> ModSummary -> Handler Hsc ParsedResult
 replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
   options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
-  traceShow cmdLineOpts $ pure ()
   dflags <- getDynFlags
   (newErrors, mod'') <-
     runM .
