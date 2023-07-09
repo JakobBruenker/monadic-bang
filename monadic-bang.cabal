@@ -45,13 +45,16 @@ maintainer:         jakob.bruenker@gmail.com
 -- copyright:
 category:           Development
 
--- Extra files to be distributed with the package, such as examples or a README.
-extra-source-files:
+extra-doc-files:
     CHANGELOG.md
     README.md
 
 tested-with:        GHC == 9.4.5
                     GHC == 9.6.2
+
+source-repository head
+    type:           git
+    location:       https://github.com/JakobBruenker/monadic-bang.git
 
 library
     -- Modules exported by the library.
@@ -116,7 +119,7 @@ test-suite monadic-bang-test
     -- Test dependencies.
     build-depends:    base,
                       ghc,
-                      ghc-boot >= 9.4,
+                      ghc-boot >= 9.4 && < 9.7,
                       ghc-paths ^>= 0.1.0.12,
                       transformers,
                       exceptions ^>= 0.10,
