@@ -4,6 +4,7 @@
 
 * Removed debug log message (thanks evincarofautumn!)
 * Minor documentation fixes
+* Added quotes to variables in error messages
 
 ## 0.1.0.0 -- 2023-01-07
 

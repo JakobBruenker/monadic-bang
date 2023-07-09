@@ -25,7 +25,7 @@ customError = PsUnknownMessage . \cases
     , diagHints = [SuggestMissingDo]
     }
   (ErrOutOfScopeVariable name) -> DiagnosticMessage
-    { diagMessage = mkDecorated [text "The variable " <> ppr name <> text " cannot be used inside of ! here, since its desugaring would escape its scope"]
+    { diagMessage = mkDecorated [text "The variable " <> quotes (ppr name) <> text " cannot be used inside of ! here, since its desugaring would escape its scope"]
     , diagReason = ErrorWithoutFlag
     , diagHints = [UnknownHint $ text "Maybe you meant to open a new 'do'-block after " <> ppr name <> text " has been bound?"]
     }
