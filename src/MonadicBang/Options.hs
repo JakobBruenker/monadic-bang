@@ -1,6 +1,7 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE CPP #-}
 
 module MonadicBang.Options where
 
@@ -22,7 +23,11 @@ data PreserveErrors = Preserve | Don'tPreserve
 
 data Options = MkOptions {verbosity :: Verbosity, preserveErrors :: PreserveErrors}
 
+#if MIN_VERSION_ghc(9,6,0)
+parseOptions :: Has (Throw ErrorCall) sig m => Located (HsModule GhcPs) -> [CommandLineOption] -> m Options
+#else
 parseOptions :: Has (Throw ErrorCall) sig m => Located HsModule -> [CommandLineOption] -> m Options
+#endif
 parseOptions mod' cmdLineOpts = do
   (remaining, options) <- runState cmdLineOpts do
     verbosity <- bool Quiet DumpTransformed <$> extractOpts verboseOpts

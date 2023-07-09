@@ -11,6 +11,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE CPP #-}
 
 module MonadicBang.Internal where
 
@@ -264,9 +265,15 @@ instance Handle Pat where
   type Effects Pat = Fill :+: State InScope
   handle' = \case
     VarPat xv name -> tellName name $> VarPat xv name
+#if MIN_VERSION_ghc(9,6,0)
+    AsPat xa name tok pat -> do
+      tellName name
+      AsPat xa name tok <$> traverse (liftMaybeT . evacPats) pat
+#else
     AsPat xa name pat -> do
       tellName name
       AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
+#endif
 
     _ -> empty
     where

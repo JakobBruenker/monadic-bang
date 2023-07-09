@@ -6,6 +6,7 @@
 * Minor documentation fixes
 * Added quotes to variables in error messages
 * Added test for `-XQualifiedDo`
+* Added support for GHC 9.6
 
 ## 0.1.0.0 -- 2023-01-07
 

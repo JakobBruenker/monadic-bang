@@ -1,5 +1,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE CPP #-}
 
 {-# OPTIONS -fplugin=MonadicBang #-}
 
@@ -70,7 +71,11 @@ initialDynFlags = do
   dflags <- withExts
   pure $ dflags{generalFlags = ES.insert Opt_ImplicitImportQualified $ generalFlags dflags}
   where
-    withExts = do pure $ foldl' xopt_set (defaultDynFlags !settings' llvmConfig') $ exts
+#if MIN_VERSION_ghc(9,6,0)
+    withExts = do pure $ foldl' xopt_set (defaultDynFlags !settings') $ exts
+#else
+    withExts = do pure $ foldl' xopt_set (defaultDynFlags !settings' $ error "llvmConfig") $ exts
+#endif
     exts = [LangExt.LambdaCase]
 
 settings' :: MonadIO m => m Settings
@@ -78,6 +83,3 @@ settings' = either (error . showSettingsError) id <$> runExceptT (initSettings G
   where
     showSettingsError (SettingsError_MissingData s) = s
     showSettingsError (SettingsError_BadData s) = s
-
-llvmConfig' :: LlvmConfig
-llvmConfig' = error "llvmConfig"

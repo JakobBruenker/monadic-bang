@@ -1,4 +1,5 @@
 {-# LANGUAGE MonoLocalBinds #-}
+{-# LANGUAGE CPP #-}
 
 module MonadicBang.Utils where
 
@@ -23,10 +24,13 @@ fromDList = appEndo ?? []
 (??) :: Functor f => f (a -> b) -> a -> f b
 fs ?? x = ($ x) <$> fs
 
+#if MIN_VERSION_ghc(9,6,0)
+#else
 -- This is included in transformers 0.6, but that can't be used together with ghc 9.4
 {-# INLINE hoistMaybe #-}
 hoistMaybe :: Applicative m => Maybe a -> MaybeT m a
 hoistMaybe = MaybeT . pure
+#endif
 
 panic :: HasCallStack => String -> a
 panic message = withFrozenCallStack $ error $

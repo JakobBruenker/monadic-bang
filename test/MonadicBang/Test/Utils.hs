@@ -1,5 +1,9 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE LambdaCase #-}
+#if MIN_VERSION_ghc(9,6,0)
+{-# LANGUAGE ScopedTypeVariables #-}
+#endif
 
 module MonadicBang.Test.Utils where
 
@@ -26,6 +30,9 @@ assertEq :: (HasCallStack, Show a, Eq a) => a -> a -> IO ()
 assertEq expected actual = when (expected /= actual) $ withFrozenCallStack do
   error $ "Expected " <> show expected <> ", but got " <> show actual
 
+sdocEq :: SDoc -> SDoc -> Bool
+sdocEq = (==) `on` showSDocUnsafe
+
 assertFailWith :: (HasCallStack, Outputable a) => [PsMessage] -> Either SourceError a -> IO ()
 assertFailWith expected = \case
   Right result -> withFrozenCallStack $ error . showSDocUnsafe $
@@ -44,9 +51,17 @@ assertFailWith expected = \case
       toPsMessage = \case
         GhcPsMessage m -> Just m
         _ -> Nothing
-      sameErrors = maybe False (((==) `on` map (unDecorated . diagnosticMessage)) expected) $ traverse toPsMessage errMsgs
+      listEq eq xs ys = and $ zipWith eq xs ys
+      sameErrors = maybe False (((listEq . listEq) sdocEq `on` map (unDecorated . diagMsg)) expected) $ traverse toPsMessage errMsgs
   where
-    diagnosticsSDoc diags = vcat (map (vcat . unDecorated . diagnosticMessage) diags)
+    diagnosticsSDoc diags = vcat (map (vcat . unDecorated . diagMsg) diags)
+
+    diagMsg :: forall a . Diagnostic a => a -> DecoratedSDoc
+#if MIN_VERSION_ghc(9,6,0)
+    diagMsg = diagnosticMessage (defaultDiagnosticOpts @a)
+#else
+    diagMsg = diagnosticMessage
+#endif
 
 assertParseFailWith :: HasCallStack => [PsMessage] -> String -> IO ()
 assertParseFailWith expected source = withFrozenCallStack do
