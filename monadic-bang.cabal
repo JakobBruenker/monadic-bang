@@ -14,7 +14,7 @@ name:               monadic-bang
 -- PVP summary:      +-+------- breaking API changes
 --                   | | +----- non-breaking API additions
 --                   | | | +--- code changes with no API change
-version:            0.1.0.0
+version:            0.1.1.0
 
 -- A short (one-line) description of the package.
 synopsis:           GHC plugin to desugar ! into do-notation
@@ -49,6 +49,9 @@ category:           Development
 extra-source-files:
     CHANGELOG.md
     README.md
+
+tested-with:        GHC == 9.4.5
+                    GHC == 9.6.2
 
 library
     -- Modules exported by the library.
@@ -90,9 +93,6 @@ library
     default-language: GHC2021
 
     ghc-options:      -Wall -Wcompat
-
-    tested-with:      GHC == 9.4.5
-                      GHC == 9.6.2
 
 test-suite monadic-bang-test
     -- Base language which the package is written in.

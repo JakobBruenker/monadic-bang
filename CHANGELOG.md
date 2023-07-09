@@ -1,6 +1,6 @@
 # Revision history for monadic-bang
 
-## 0.1.1.0
+## 0.1.1.0 -- 2023-07-10
 
 * Removed debug log message (thanks evincarofautumn!)
 * Minor documentation fixes
