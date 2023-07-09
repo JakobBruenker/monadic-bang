@@ -1,4 +1,5 @@
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE QualifiedDo #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -14,6 +15,7 @@ import Data.Char
 import Control.Monad.Trans.State
 
 import MonadicBang.Test.Utils
+import MonadicBang.Test.Utils.QualifiedDo qualified as QualifiedDo
 
 shouldPass :: Test
 shouldPass = do
@@ -35,6 +37,7 @@ shouldPass = do
   usingDoBlockVar
   largeExpr
   confusing
+  qualifiedDo
 
 getA, getB, getC :: IO String
 getA = pure "a"
@@ -139,3 +142,11 @@ confusing = do
     put 4
     put 5
     pure !get 
+
+qualifiedDo :: Test
+qualifiedDo = do
+  assertEq (5 + 10 + 20 + (5 + 20)) QualifiedDo.do
+    x <- 5
+    10
+    y <- 20
+    x + y
