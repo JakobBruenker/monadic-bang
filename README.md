@@ -154,7 +154,7 @@ This should also allow HLS to pick up on the plugin, as long as you use HLS 1.9.
 The plugin supports a couple of options, which you can provide via invocations of `-fplugin-opt=MonadicBang:<option>`. The options are:
 
 - `-ddump`: Print the altered AST
-- `-preserve-errors`: Keep parse errors about `!` outside of `do` in their original form, rather then a more relevant explanation. This is mainly useful if another plugin expects those errors.
+- `-preserve-errors`: Keep parse errors about `!` outside of `do` in their original form, rather than a more relevant explanation. This is mainly useful if another plugin expects those errors.
 
 ## Cute Things
 
@@ -183,7 +183,7 @@ If you have `-XApplicativeDo` enabled, this even works with `Applicative` instan
 do putStrLn !(readFile (!getArgs !! 1))
 ```
 
-For how this is desugared, see [Desugaring](#desugaring)
+For how this is desugared, see [Desugaring](#desugaring).
 
 ### Using `-XQualifiedDo`
 
@@ -213,7 +213,7 @@ main = run Linear.do
 
 ### List comprehensions
 
-List comprehensions are kind of just special `do`-blocks, so `!` can be used here as well (and also in monad comprehensions). Example:
+List comprehensions are essentially just special `do`-blocks, so `!` can be used here as well (as well as in monad comprehensions). Example:
 
 ```haskell
 [ x + ![1, 2, 3] | x <- [60, 70, ![800, 900]] ]
@@ -223,7 +223,7 @@ This would be equivalent to
 [ x + b | a <- [800, 900], x <- [60, 70, a], b <- [1, 2, 3]]
 ```
 
-The reason `b <- ...` is at the end here instead of the beginning is that everything that appears to the left of the `|` in a list comprehension is essentially comparable to the last statement of a `do`-block (+ `pure`).
+The reason `b <- ...` is at the end here instead of the beginning is that everything that appears to the left of the `|` in a list comprehension is essentially treated like the last statement of a `do`-block (+ `pure`).
 
 ### Get Rid of `<-`
 
@@ -241,7 +241,7 @@ main = do
   ...
 ```
 
-⚠️ NB: This would not work for e.g. `whileM`. In implementations of `whileM`, the condition is re-evaluated after every iteration. If you wrote e.g. `while (!(readIORef i) > 0)`, it would only be evaluated once, before the first iteration.
+⚠️ NB: This works here since `when` only needs to evaluate its condition once. If you were to try to replace e.g. one of the forms of `whileM` in this manner, you would run into trouble since it's supposed to evaluate the condition again on each iteration.
 
 ## Caveats
 
@@ -250,7 +250,7 @@ There are a few disadvantages to using this that are worth mentioning:
 - Since the plugin modifies the source code, the location info in error messages might look a bit strange, since it contains the desugared version. This shouldn't be an issue if you use HLS or another tool to highlight errors within your editor.
 - HLint currently does not work with this plugin (HLint will show you a parse error if you try to use `!`.)
 - If there are fatal parse errors in the source code, unfortunately each `!` will also be highlighted as a parse error. This is unavoidable at the moment, since the plugin can only intercept those messages if the module is otherwise successfully parsed.
-- Plugins like this cannot affect GHCi
+- Plugins like this cannot be used inside of GHCi at this time (however, you can load modules that use it into GHCi).
 - Arguably this makes `do`-desugaring slightly more confusing - e.g., compare the following:
 
   ```haskell
@@ -265,6 +265,8 @@ There are a few disadvantages to using this that are worth mentioning:
   ```  
   
   With the usual desugaring rules, whether you use `>>` or a new line shouldn't make a difference, but here, the first snippet will print `4`, while the second snippet will print `5`.
+
+  Because of this, the plugin is usually best used in situations where the order in which effects happen makes no difference.
 
 ## Details
 
@@ -306,7 +308,7 @@ where `<!a>` etc. are simply special variable names.
 
 So, broadly speaking, the order in which things are bound is top-to-bottom (statement-wise), inside-out, and left-to-right.
 
-This can be important when the order of effects matters - though if order does matter, `!` might not be the clearest way to express things.
+This can be important when the order of effects matters - though as mentioned above, if order *does* matter, `!` might not be the clearest way to express things.
 
 `!` will only bubble up to the nearest `do`-block. To illustrate:
 
@@ -391,5 +393,5 @@ f = putStrLn !getLine
 but (assuming it's at top-level) wouldn't be with this plugin; you would have to write `f = do putStrLn !getLine` instead.
 
 Some other differences:
-- In Idris, `!`'d expressions cannot escape outside of a lambda expression (it effectively inserts a new `do` at the beginning of the lambda body instead)
+- In Idris, `!`'d expressions cannot escape to outside of a lambda expression (it effectively inserts a new `do` at the beginning of the lambda body instead)
 - The same difference applies to `let` bindings that define functions
