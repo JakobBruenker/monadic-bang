@@ -31,7 +31,7 @@ combined :: Test
 combined = assertParseFailWith (mkErrors [S "x", S "f", S "a", S "b", S "b", O, O]) "\
 \!(!do\n\
 \  x <- getA\n\
-\  let y = let x = print 24 in !x\n\
+\  let y = let x = print 24 in x\n\
 \  let f (a, b) = !(f a) + !(let c = c + b in c + b + z)\n\
 \  pure y)\n\
 \"
