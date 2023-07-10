@@ -145,7 +145,7 @@ confusing = do
 
 qualifiedDo :: Test
 qualifiedDo = do
-  assertEq (5 + 10 + 20 + (5 + 20)) QualifiedDo.do
+  assertEq (5 + 11 + 20 + (5 + 20)) QualifiedDo.do
     x <- 5
     10
     y <- 20
