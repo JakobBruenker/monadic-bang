@@ -19,11 +19,7 @@ data Error = ErrOutOfScopeVariable OccName
 type PsErrors = Writer (Messages PsError)
 
 customError :: Error -> PsError
-#if MIN_VERSION_ghc(9,6,0)
-customError = PsUnknownMessage . UnknownDiagnostic . \cases
-#else
 customError = PsUnknownMessage . \cases
-#endif
   ErrBangOutsideOfDo -> DiagnosticMessage
     { diagMessage = mkDecorated [text "Monadic ! outside of a 'do'-block is not allowed"]
     , diagReason = ErrorWithoutFlag
