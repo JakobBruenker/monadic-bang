@@ -122,7 +122,6 @@ test-suite monadic-bang-test
                       ghc-boot >= 9.4 && < 9.7,
                       ghc-paths ^>= 0.1.0.12,
                       transformers,
-                      exceptions ^>= 0.10,
                       monadic-bang
 
     ghc-options:      -Wall -Wcompat -plugin-package=monadic-bang
