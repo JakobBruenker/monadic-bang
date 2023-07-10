@@ -1,5 +1,7 @@
 # Monadic Bang
 
+[![Run Tests](https://github.com/JakobBruenker/monadic-bang/actions/workflows/haskell.yml/badge.svg?branch=main&event=push)](https://github.com/JakobBruenker/monadic-bang/actions/workflows/haskell.yml)
+
 This is a GHC Parser plugin for GHC 9.4 and above, intended to make monadic code within `do`-blocks more concise and nicer to work with. Works with HLS.
 
 This is heavily inspired by [Idris's !-notation](https://idris2.readthedocs.io/en/latest/tutorial/interfaces.html#notation), but with some [important differences](#comparison-with-idriss--notation).
