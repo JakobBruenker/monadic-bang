@@ -16,6 +16,7 @@ import Control.Monad.Trans.State
 
 import MonadicBang.Test.Utils
 import MonadicBang.Test.Utils.QualifiedDo qualified as QualifiedDo
+import Control.Monad.IO.Class
 
 shouldPass :: Test
 shouldPass = do
@@ -39,7 +40,7 @@ shouldPass = do
   confusing
   qualifiedDo
 
-getA, getB, getC :: IO String
+getA, getB, getC :: MonadIO m => m String
 getA = pure "a"
 getB = pure "b"
 getC = pure "c"
