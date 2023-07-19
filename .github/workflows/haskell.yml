@@ -33,10 +33,10 @@ jobs:
           cabal build --dry-run
 
       - name: Install dependencies
-        run: cabal build all --only-dependencies
+        run: cabal build all --only-dependencies --enable-tests
 
       - name: Build
-        run: cabal build all --ghc-options="-Werror"
+        run: cabal build all --ghc-options="-Werror" --enable-tests
 
       - name: Run tests
-        run: cabal test all
+        run: cabal test all --ghc-options="-Werror"
