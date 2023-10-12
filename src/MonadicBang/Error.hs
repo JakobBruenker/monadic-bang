@@ -8,6 +8,9 @@ import Prelude hiding ((<>))
 import Control.Effect.Writer
 
 import GHC
+#if MIN_VERSION_ghc(9,8,0)
+import GHC.Utils.Error
+#endif
 import GHC.Types.Error
 import GHC.Types.Name.Occurrence
 import GHC.Parser.Errors.Types
@@ -19,7 +22,9 @@ data Error = ErrOutOfScopeVariable OccName
 type PsErrors = Writer (Messages PsError)
 
 customError :: Error -> PsError
-#if MIN_VERSION_ghc(9,6,0)
+#if MIN_VERSION_ghc(9,8,0)
+customError = PsUnknownMessage . mkUnknownDiagnostic . \cases
+#elif MIN_VERSION_ghc(9,6,0)
 customError = PsUnknownMessage . UnknownDiagnostic . \cases
 #else
 customError = PsUnknownMessage . \cases
@@ -36,4 +41,9 @@ customError = PsUnknownMessage . \cases
     }
 
 tellPsError :: Has PsErrors sig m => PsError -> SrcSpan -> m ()
-tellPsError err srcSpan = tell . singleMessage $ MsgEnvelope srcSpan neverQualify err SevError
+tellPsError err srcSpan = tell . singleMessage $
+#if MIN_VERSION_ghc(9,8,0)
+  mkErrorMsgEnvelope srcSpan neverQualify err
+#else
+  MsgEnvelope srcSpan neverQualify err SevError
+#endif
