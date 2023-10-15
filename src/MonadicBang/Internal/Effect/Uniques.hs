@@ -4,7 +4,7 @@
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module MonadicBang.Effect.Uniques where
+module MonadicBang.Internal.Effect.Uniques where
 
 import Control.Algebra
 import Control.Carrier.State.Strict

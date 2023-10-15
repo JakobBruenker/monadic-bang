@@ -44,14 +44,14 @@ import Text.Printf
 
 import GHC.Utils.Logger
 
-import MonadicBang.Effect.Offer
-import MonadicBang.Effect.Uniques
-import MonadicBang.Options
-import MonadicBang.Utils
-import MonadicBang.Error
+import MonadicBang.Internal.Effect.Offer
+import MonadicBang.Internal.Effect.Uniques
+import MonadicBang.Internal.Options
+import MonadicBang.Internal.Utils
+import MonadicBang.Internal.Error
+import MonadicBang.Internal.Effect.Writer.Discard
 
 import Data.Kind
-import MonadicBang.Effect.Writer.Discard
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module

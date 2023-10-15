@@ -1,7 +1,7 @@
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE CPP #-}
 
-module MonadicBang.Utils where
+module MonadicBang.Internal.Utils where
 
 import Control.Monad.Trans.Maybe
 import Data.Monoid

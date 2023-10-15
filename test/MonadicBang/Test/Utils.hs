@@ -25,7 +25,7 @@ import GHC.Types.SourceError
 import GHC.Utils.Outputable hiding ((<>))
 
 import MonadicBang.Test.Utils.RunGhcParser
-import MonadicBang.Utils
+import MonadicBang.Internal.Utils
 import Data.Monoid
 
 data FailType

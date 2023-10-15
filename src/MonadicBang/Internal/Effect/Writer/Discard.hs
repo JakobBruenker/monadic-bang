@@ -4,7 +4,7 @@
 {-# LANGUAGE GADTs #-}
 
 -- | A Writer carrier that discards any values it is told
-module MonadicBang.Effect.Writer.Discard where
+module MonadicBang.Internal.Effect.Writer.Discard where
 
 import Control.Algebra
 import Control.Effect.Writer

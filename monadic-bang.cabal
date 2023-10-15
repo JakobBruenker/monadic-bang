@@ -61,12 +61,12 @@ library
     -- Modules exported by the library.
     exposed-modules:  MonadicBang
                       MonadicBang.Internal
-                      MonadicBang.Effect.Offer
-                      MonadicBang.Effect.Uniques
-                      MonadicBang.Effect.Writer.Discard
-                      MonadicBang.Options
-                      MonadicBang.Utils
-                      MonadicBang.Error
+                      MonadicBang.Internal.Effect.Offer
+                      MonadicBang.Internal.Effect.Uniques
+                      MonadicBang.Internal.Effect.Writer.Discard
+                      MonadicBang.Internal.Options
+                      MonadicBang.Internal.Utils
+                      MonadicBang.Internal.Error
 
     -- Modules included in this library but not exported.
     -- other-modules:

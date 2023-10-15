@@ -3,6 +3,7 @@
 ## 0.2.0.0 -- 2023-10-16
 
 * Added support for GHC 9.8
+* Prefix internal modules with `Internal`
 
 ## 0.1.1.0 -- 2023-07-10
 

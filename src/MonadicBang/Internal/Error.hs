@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE CPP #-}
 
-module MonadicBang.Error where
+module MonadicBang.Internal.Error where
 
 import Prelude hiding ((<>))
 

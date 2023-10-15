@@ -3,7 +3,7 @@
 module MonadicBang.Test.ShouldFail (shouldFail) where
 
 import MonadicBang.Test.Utils
-import MonadicBang.Error
+import MonadicBang.Internal.Error
 
 import GHC.Types.Name.Occurrence
 
