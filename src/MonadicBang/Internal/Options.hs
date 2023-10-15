@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE CPP #-}
 
-module MonadicBang.Options where
+module MonadicBang.Internal.Options where
 
 import Control.Exception
 import Control.Algebra
