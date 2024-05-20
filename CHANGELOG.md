@@ -1,6 +1,10 @@
 # Revision history for monadic-bang
 
-## 0.2.0.0 -- 2023-10-16
+## 0.2.2.0 -- 2024-05-20
+
+* Added support for GHC 9.10
+
+## 0.2.1.0 -- 2023-10-16
 
 * Added support for GHC 9.8
 * Prefix internal modules with `Internal`
@@ -15,4 +19,4 @@
 
 ## 0.1.0.0 -- 2023-01-07
 
-* First version. Released on an unsuspecting world.
+* First version
