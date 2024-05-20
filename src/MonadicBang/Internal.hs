@@ -52,6 +52,7 @@ import MonadicBang.Internal.Error
 import MonadicBang.Internal.Effect.Writer.Discard
 
 import Data.Kind
+import Data.Coerce
 
 -- We don't care about which file things are from, because the entire AST comes
 -- from the same module
@@ -61,12 +62,33 @@ data Loc = MkLoc {line :: Int, col :: Int}
 type Expr = HsExpr GhcPs
 type LExpr = LHsExpr GhcPs
 
+-- | OccSet newtype that allows us to define an orphan Monoid instance
+newtype Occs = MkOccs OccSet
+
+instance Semigroup Occs where
+  (<>) = coerce unionOccSets
+
+instance Monoid Occs where
+  mempty = emptyOccs
+
+emptyOccs :: Occs
+emptyOccs = coerce emptyOccSet
+
+extendOccs :: Occs -> OccName -> Occs
+extendOccs = coerce extendOccSet
+
+elemOccs :: OccName -> Occs -> Bool
+elemOccs = coerce elemOccSet
+
+unitOccs :: OccName -> Occs
+unitOccs = coerce unitOccSet
+
 -- | To keep track of which local variables in scope may be used
 --
 -- If local variables are defined within the same statement as a !, but outside
 -- of that !, they must not be used within this !, since their desugaring would
 -- make them escape their scope.
-data InScope = MkInScope {valid :: OccSet , invalid :: OccSet}
+data InScope = MkInScope {valid :: Occs , invalid :: Occs}
 
 instance Semigroup InScope where
   a <> b = MkInScope{valid = a.valid <> b.valid, invalid = a.invalid <> b.invalid}
@@ -75,21 +97,21 @@ instance Monoid InScope where
   mempty = noneInScope
 
 noneInScope :: InScope
-noneInScope = MkInScope emptyOccSet emptyOccSet
+noneInScope = MkInScope emptyOccs emptyOccs
 
 addValid :: OccName -> InScope -> InScope
-addValid name inScope = inScope{valid = extendOccSet inScope.valid name}
+addValid name inScope = inScope{valid = extendOccs inScope.valid name}
 
-addValids :: OccSet -> InScope -> InScope
+addValids :: Occs -> InScope -> InScope
 addValids names inScope = inScope{valid = inScope.valid <> names}
 
 invalidateVars :: InScope -> InScope
-invalidateVars inScope = MkInScope{valid = emptyOccSet, invalid = inScope.valid <> inScope.invalid}
+invalidateVars inScope = MkInScope{valid = emptyOccs, invalid = inScope.valid <> inScope.invalid}
 
 isInvalid :: Has (Reader InScope) sig m => OccName -> m Bool
 isInvalid name = do
   inScope <- ask @InScope
-  pure $ name `elemOccSet` inScope.invalid
+  pure $ name `elemOccs` inScope.invalid
 
 -- | Decrement column by one to get the location of a !
 bangLoc :: Loc -> Loc
@@ -122,7 +144,7 @@ replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
     runWriter .
     runReader options .
     runReader noneInScope .
-    evalWriter @OccSet .
+    evalWriter @Occs .
     runReader dflags $
     fillHoles fills mod'
   log options.verbosity (ppr mod'')
@@ -265,7 +287,11 @@ instance Handle Pat where
   type Effects Pat = Fill :+: State InScope
   handle' = \case
     VarPat xv name -> tellName name $> VarPat xv name
-#if MIN_VERSION_ghc(9,6,0)
+#if MIN_VERSION_ghc(9,10,0)
+    AsPat xa name pat -> do
+      tellName name
+      AsPat xa name <$> traverse (liftMaybeT . evacPats) pat
+#elif MIN_VERSION_ghc(9,6,0)
     AsPat xa name tok pat -> do
       tellName name
       AsPat xa name tok <$> traverse (liftMaybeT . evacPats) pat
@@ -299,16 +325,22 @@ instance Handle HsExpr where
         tellOne $ name :<- lexpr'
         pure . L l $ HsVar noExtField (noLocA name)
       HsVar _ (occName . unLoc -> name) -> do
-        whenM (isInvalid name) do tellPsError (customError $ ErrOutOfScopeVariable name) l.locA
+        whenM (isInvalid name) do tellPsError (customError $ ErrOutOfScopeVariable name) (locA l)
         pure e
       -- In HsDo, we can discard all in-scope variables in the context, since
       -- any !-desugaring we encounter cannot escape outside of this
       -- 'do'-block, and thus also not outside of the scope of those
       -- variables
       HsDo xd ctxt stmts -> L l . HsDo xd ctxt <$> local (const noneInScope) (traverse addStmts stmts)
+#if MIN_VERSION_ghc(9,10,0)
+      HsLet xl binds ex -> do
+        (boundVars, binds') <- runWriter @Occs $ evac binds
+        fmap (L l . HsLet xl binds') <$> liftMaybeT . local (addValids boundVars) $ evac ex
+#else
       HsLet xl letTok binds inTok ex -> do
-        (boundVars, binds') <- runWriter @OccSet $ evac binds
+        (boundVars, binds') <- runWriter @Occs $ evac binds
         fmap (L l . HsLet xl letTok binds' inTok) <$> liftMaybeT . local (addValids boundVars) $ evac ex
+#endif
 
       _ -> empty
 
@@ -390,7 +422,7 @@ type HoleFills = Offer Loc LExpr
 -- 'do'-block, and must therefore not be used.
 -- The Reader is used to find out what local variables are in scope, the Writer
 -- is used to inform callers which local variables have been bound.
-type LocalVars = Reader InScope :+: Writer OccSet
+type LocalVars = Reader InScope :+: Writer Occs
 
 type Fill = PsErrors :+: Writer (DList BindStmt) :+: HoleFills :+: Uniques :+: LocalVars :+: Reader DynFlags
 
@@ -400,11 +432,11 @@ bindStmtExpr :: BindStmt -> LExpr
 bindStmtExpr (_ :<- expr) = expr
 
 bindStmtSpan :: BindStmt -> SrcSpan
-bindStmtSpan = (.locA) . \(_ :<- L l _) -> l
+bindStmtSpan = locA . \(_ :<- L l _) -> l
 
 fromBindStmt :: BindStmt -> ExprLStmt GhcPs
 fromBindStmt = noLocA . \cases
-  (var :<- lexpr) -> BindStmt EpAnnNotUsed varPat lexpr
+  (var :<- lexpr) -> BindStmt noAnn varPat lexpr
     where
       varPat = noLocA . VarPat noExtField $ noLocA var
 
@@ -419,7 +451,7 @@ bangVar (L spn expr) loc = do
         (str:rest) | null rest && length str < 20 -> str
                    | otherwise                    -> take 16 str ++ "..."
         _                                         -> "<empty expression>"
-  locVar name spn.locA loc
+  locVar name (locA spn) loc
 
 locVar :: Has Uniques sig m => String -> SrcSpan -> Loc -> m RdrName
 locVar str spn loc = do
@@ -430,5 +462,5 @@ locVar str spn loc = do
 tellOne :: Has (Writer (DList w)) sig m => w -> m ()
 tellOne x = tell $ Endo (x:)
 
-tellLocalVar :: Has (Writer OccSet) sig m => OccName -> m ()
-tellLocalVar = tell . unitOccSet
+tellLocalVar :: Has (Writer Occs) sig m => OccName -> m ()
+tellLocalVar = tell . unitOccs
