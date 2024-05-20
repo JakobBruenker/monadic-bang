@@ -10,7 +10,9 @@ module MonadicBang.Test.Utils.RunGhcParser where
 
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Except
+#if !MIN_VERSION_ghc(9,10,0)
 import Data.Foldable
+#endif
 
 import GHC
 import GHC.Driver.Plugins

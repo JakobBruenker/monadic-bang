@@ -52,6 +52,7 @@ extra-doc-files:
 tested-with:        GHC == 9.4.7
                     GHC == 9.6.3
                     GHC == 9.8.1
+                    GHC == 9.10.1
 
 source-repository head
     type:           git
@@ -84,8 +85,8 @@ library
                       PatternSynonyms
 
     -- Other library packages from which modules are imported.
-    build-depends:    base >=4.17.0.0 && <4.20,
-                      ghc >=9.4 && <9.9,
+    build-depends:    base >=4.17.0.0 && <4.21,
+                      ghc >=9.4 && <9.11,
                       containers ^>=0.6.4.1 || ^>=0.7,
                       transformers >=0.5.6.2 && <0.7,
                       fused-effects ^>=1.1.1.2
@@ -120,7 +121,7 @@ test-suite monadic-bang-test
     -- Test dependencies.
     build-depends:    base,
                       ghc,
-                      ghc-boot >=9.4 && <9.9,
+                      ghc-boot >=9.4 && <9.11,
                       ghc-paths ^>=0.1.0.12,
                       transformers,
                       monadic-bang
