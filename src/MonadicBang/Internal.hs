@@ -135,20 +135,22 @@ spanToLoc :: RealSrcSpan -> Loc
 spanToLoc = liftA2 MkLoc srcLocLine srcLocCol . realSrcSpanStart
 
 replaceBangs :: [CommandLineOption] -> ModSummary -> Handler Hsc ParsedResult
-replaceBangs cmdLineOpts _ (ParsedResult (HsParsedModule mod' files) msgs) = do
-  options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
-  dflags <- getDynFlags
-  (newErrors, mod'') <-
-    runM .
-    runUniquesIO 'p' .
-    runWriter .
-    runReader options .
-    runReader noneInScope .
-    evalWriter @Occs .
-    runReader dflags $
-    fillHoles fills mod'
-  log options.verbosity (ppr mod'')
-  pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
+replaceBangs cmdLineOpts _ orig@(ParsedResult (HsParsedModule mod' files) msgs)
+  | null fills = pure orig
+  | otherwise = do
+    options <- liftIO . (either throwIO pure =<<) . runThrow @ErrorCall $ parseOptions mod' cmdLineOpts
+    dflags <- getDynFlags
+    (newErrors, mod'') <-
+      runM .
+      runUniquesIO 'p' .
+      runWriter .
+      runReader options .
+      runReader noneInScope .
+      evalWriter @Occs .
+      runReader dflags $
+      fillHoles fills mod'
+    log options.verbosity (ppr mod'')
+    pure $ ParsedResult (HsParsedModule mod'' files) msgs{psErrors = oldErrors <> newErrors}
   where
     log = \cases
       Quiet _ -> pure ()
