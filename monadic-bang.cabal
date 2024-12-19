@@ -14,7 +14,7 @@ name:               monadic-bang
 -- PVP summary:      +-+------- breaking API changes
 --                   | | +----- non-breaking API additions
 --                   | | | +--- code changes with no API change
-version:            0.2.2.1
+version:            0.2.2.2
 
 -- A short (one-line) description of the package.
 synopsis:           GHC plugin to desugar ! into do-notation
@@ -53,6 +53,7 @@ tested-with:        GHC == 9.4.7
                     GHC == 9.6.3
                     GHC == 9.8.1
                     GHC == 9.10.1
+                    GHC == 9.12.1
 
 source-repository head
     type:           git
@@ -85,8 +86,8 @@ library
                       PatternSynonyms
 
     -- Other library packages from which modules are imported.
-    build-depends:    base >=4.17.0.0 && <4.21,
-                      ghc >=9.4 && <9.11,
+    build-depends:    base >=4.17.0.0 && <4.22,
+                      ghc >=9.4 && <9.13,
                       containers ^>=0.6.4.1 || ^>=0.7,
                       transformers >=0.5.6.2 && <0.7,
                       fused-effects ^>=1.1.1.2
@@ -121,7 +122,7 @@ test-suite monadic-bang-test
     -- Test dependencies.
     build-depends:    base,
                       ghc,
-                      ghc-boot >=9.4 && <9.11,
+                      ghc-boot >=9.4 && <9.13,
                       ghc-paths ^>=0.1.0.12,
                       transformers,
                       monadic-bang

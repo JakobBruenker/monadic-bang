@@ -42,7 +42,7 @@ parseGhc src = do
       modSummary = ModSummary
         { ms_mod = mkModule (stringToUnit modNameStr) modName
         , ms_hsc_src = HsSrcFile
-        , ms_location = mkHomeModLocation (initFinderOpts dflags) modName ""
+        , ms_location = mkHomeModLocation (initFinderOpts dflags) modName (error "monadic-bang (test suite): no home path")
         , ms_hs_hash = fingerprintString src
         , ms_obj_date = Nothing
         , ms_dyn_obj_date = Nothing
@@ -66,7 +66,12 @@ runDefaultGhc dflags action = liftIO do
     addPlugin = do
       let session = !getSession
           plugins = hsc_plugins session
-      setSession (session{hsc_plugins = plugins{staticPlugins = StaticPlugin (PluginWithArgs MonadicBang.plugin []) : staticPlugins plugins}})
+      setSession (session{hsc_plugins = plugins{staticPlugins = StaticPlugin
+        { spPlugin = PluginWithArgs MonadicBang.plugin []
+#if MIN_VERSION_ghc(9,12,0)
+        , spInitialised = False
+#endif
+        } : staticPlugins plugins}})
 
 initialDynFlags :: MonadIO m => m DynFlags
 initialDynFlags = do
