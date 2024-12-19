@@ -371,7 +371,7 @@ instance Handle StmtLR where
 -- source span can be found in the given list.
 fillHoles :: (Data a, Has (PsErrors :+: Reader Options :+: Uniques :+: LocalVars :+: Reader DynFlags) sig m) => Map Loc LExpr -> Handler m a
 fillHoles fillers ast = do
-  (remainingErrs, (fromDList -> binds :: [BindStmt], ast')) <- runOffer fillers . runWriter $ evac ast
+  (remainingErrs, (fromDList -> (binds :: [BindStmt]), ast')) <- runOffer fillers . runWriter $ evac ast
   MkOptions{preserveErrors} <- ask
   for_ binds \bind -> tellPsError (psError (bindStmtExpr bind) preserveErrors) (bangSpan $ bindStmtSpan bind)
   dflags <- ask
