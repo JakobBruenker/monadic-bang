@@ -1,5 +1,9 @@
 # Revision history for monadic-bang
 
+## 0.2.2.3 -- 2026-02-04
+
+* Added support for GHC 9.14
+
 ## 0.2.2.1 -- 2024-05-20
 
 * Only run plugin on modules that contain bangs
