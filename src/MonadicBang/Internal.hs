@@ -319,7 +319,11 @@ instance Handle HsExpr where
       -- Replace holes resulting from `!`
       -- If no corresponding expression can be found in the Offer, we assume
       -- that it was a hole put there by the user and leave it unmodified
+#if MIN_VERSION_ghc(9,14,0)
+      HsHole _ -> yoink loc >>= maybe (pure e) \lexpr -> do
+#else
       HsUnboundVar _ _ -> yoink loc >>= maybe (pure e) \lexpr -> do
+#endif
         -- all existing valid local variables now become invalid, since using
         -- them would make them escape their scope
         lexpr' <- local invalidateVars $ evac lexpr

@@ -13,6 +13,9 @@ import Control.Monad.Trans.Except
 #if !MIN_VERSION_ghc(9,10,0)
 import Data.Foldable
 #endif
+#if MIN_VERSION_ghc(9,14,0)
+import System.OsPath (unsafeEncodeUtf)
+#endif
 
 import GHC
 import GHC.Driver.Plugins
@@ -42,7 +45,11 @@ parseGhc src = do
       modSummary = ModSummary
         { ms_mod = mkModule (stringToUnit modNameStr) modName
         , ms_hsc_src = HsSrcFile
+#if MIN_VERSION_ghc(9,14,0)
+        , ms_location = mkHomeModLocation (initFinderOpts dflags) modName (error "monadic-bang (test suite): no home path") (unsafeEncodeUtf "hs") HsSrcFile
+#else
         , ms_location = mkHomeModLocation (initFinderOpts dflags) modName (error "monadic-bang (test suite): no home path")
+#endif
         , ms_hs_hash = fingerprintString src
         , ms_obj_date = Nothing
         , ms_dyn_obj_date = Nothing
@@ -50,7 +57,9 @@ parseGhc src = do
         , ms_hie_date = Nothing
         , ms_srcimps = []
         , ms_textual_imps = []
+#if !MIN_VERSION_ghc(9,14,0)
         , ms_ghc_prim_import = False
+#endif
         , ms_parsed_mod = Nothing
         , ms_hspp_file = modNameStr
         , ms_hspp_opts = dflags
