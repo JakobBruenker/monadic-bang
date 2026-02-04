@@ -16,6 +16,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: nomeata/haskell-bounds-bump-action@main
+    - if: success()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'bump-failure',
+          });
+          for (const issue of issues) {
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: 'closed',
+              state_reason: 'completed',
+            });
+          }
     - if: failure()
       uses: actions/github-script@v7
       with:
