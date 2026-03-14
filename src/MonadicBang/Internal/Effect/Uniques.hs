@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -29,7 +30,15 @@ newtype UniquesC m a = UniquesC {getUniquesState :: StateC UniqSupply m a}
 --
 -- See Note [Uniques for wired-in prelude things and known masks] in GHC.Builtin.Uniques
 runUniquesIO :: MonadIO m => Char -> UniquesC m a -> m a
-runUniquesIO mask (UniquesC s) = flip evalState s =<< liftIO (mkSplitUniqSupply mask)
+runUniquesIO mask (UniquesC s) = flip evalState s =<< liftIO (mkSplitUniqSupply (toUniqueTag mask))
+
+#if MIN_VERSION_ghc(9,15,0)
+toUniqueTag :: Char -> UniqueTag
+toUniqueTag _ = PluginTag
+#else
+toUniqueTag :: Char -> Char
+toUniqueTag = id
+#endif
 
 runUniques :: Functor m => UniqSupply -> UniquesC m a -> m a
 runUniques uniqSupply (UniquesC s) = evalState uniqSupply s
